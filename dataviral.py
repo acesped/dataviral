@@ -276,28 +276,75 @@ def _validate_ai_data(data):
     return data
 
 
-def ajustar_texto_visual(texto, max_caracteres=85):
-    """Abrevia una etiqueta visual en el límite de palabra, sin cambiar el original.
+def ajustar_texto_visual(texto, max_caracteres=40, max_palabras=6):
+    """Obtiene una microfrase SIN cortar letras ni añadir puntos suspensivos.
 
-    Para no publicar una afirmación recortada, intenta usar una oración entera;
-    las escenas son solo apoyo visual y nunca sustituyen el guion narrado.
+    Si la entrada excede seis palabras, se utiliza una frase breve completa
+    cuando sea posible. En caso contrario, se elige un grupo de palabras
+    recortado en frontera léxica y se quita un conector final colgante.
     """
-    texto = re.sub(r'\s+', ' ', str(texto or '')).strip()
-    if len(texto) <= max_caracteres:
-        return texto
-    # Una oración completa evita frases visuales suspendidas.
-    oraciones = re.split(r'(?<=[.!?])\s+', texto)
-    for oracion in oraciones:
-        if 12 <= len(oracion) <= max_caracteres:
-            return oracion
-    # Si no cabe ninguna oración, abreviar sin dividir palabras.
-    palabras = []
-    for palabra in texto.split():
-        candidato = ' '.join(palabras + [palabra])
-        if len(candidato) > max_caracteres - 1:
+    texto = re.sub(r'\s+', ' ', str(texto or '')).strip(' \t\n.,;:')
+    texto = re.sub(r'https?://\S+', '', texto).strip()
+    # Si una pregunta original queda demasiado larga, presentar la afirmación central.
+    if len(texto.split()) > max_palabras:
+        texto = re.sub(r'^[¿¡]?\s*(?:sab[ií]as que|sab[ií]as|te imaginas que)\s+', '', texto, flags=re.I)
+    texto = texto.lstrip('¿¡')
+    if not texto:
+        return 'DESCUBRE ALGO NUEVO'
+    candidatos = re.split(r'(?<=[.!?;:])\s+|\s+[—–]\s+|,\s+', texto)
+    candidatos = [x.strip(' .,:;!?') for x in candidatos if x.strip(' .,:;!?')]
+    candidato = next((x for x in candidatos if len(x.split()) <= max_palabras
+                      and len(x) <= max_caracteres), candidatos[0] if candidatos else texto)
+    palabras = candidato.split()
+    elegidas = []
+    for palabra in palabras:
+        if len(elegidas) >= max_palabras or len(' '.join(elegidas + [palabra])) > max_caracteres:
             break
-        palabras.append(palabra)
-    return ' '.join(palabras).rstrip(' ,;:.!?') + '…' if palabras else texto[:max_caracteres-1] + '…'
+        elegidas.append(palabra)
+    conectores = {'de', 'del', 'la', 'el', 'los', 'las', 'un', 'una', 'y', 'o', 'que',
+                  'para', 'por', 'con', 'sin', 'en', 'a', 'al', 'su', 'sus', 'es'}
+    while len(elegidas) > 2 and elegidas[-1].lower().strip('.,:;') in conectores:
+        elegidas.pop()
+    return ' '.join(elegidas).strip(' .,:;!?¿¡') or 'DATO SORPRENDENTE'
+
+
+def microfrases(ep):
+    """Cinco titulares, nunca el texto completo de la narración."""
+    ai = ep.get('visuals')
+    if isinstance(ai, list) and len(ai) == 5 and all(isinstance(v, str) and v.strip() for v in ai):
+        raw = ai
+    else:
+        raw = [ep.get('title', ''), '¿SABÍAS ESTO?',
+               ep.get('fact', '') or 'UN DATO REAL',
+               ep.get('lesson', '') or 'UNA IDEA ÚTIL',
+               'AHORA YA LO SABES']
+    return [ajustar_texto_visual(v, 38, 6).upper() for v in raw]
+
+
+def texto_centrado_seguro(draw, texto, *, centro_y, ancho=550, max_lineas=2):
+    """Dibuja en el rectángulo central sin salirse ni cortar renglones."""
+    texto = ajustar_texto_visual(texto, 38, 6).upper()
+    for tam in range(66, 30, -2):
+        fuente = font(tam, True)
+        lineas = wrap_text(draw, texto, fuente, ancho)
+        if len(lineas) > max_lineas:
+            continue
+        medidas = [draw.textbbox((0, 0), lin, font=fuente, stroke_width=1) for lin in lineas]
+        if any((b[2] - b[0]) > ancho for b in medidas):
+            continue
+        salto = tam + 18
+        alto = len(lineas) * salto
+        if alto > 240:
+            continue
+        y = centro_y - alto // 2
+        for linea in lineas:
+            caja = draw.textbbox((0, 0), linea, font=fuente, stroke_width=1)
+            x = (720 - (caja[2] - caja[0])) / 2
+            draw.text((x, y), linea, font=fuente, fill=(255,255,255),
+                      stroke_width=1, stroke_fill=(4, 7, 22))
+            y += salto
+        return
+    raise ValueError('No es posible componer un titular dentro de la zona segura')
 
 
 def create_ai_episode(ep):
@@ -311,11 +358,15 @@ def create_ai_episode(ep):
         'Eres editor de microdocumentales rigurosos para la marca Dato Wow. '
         'Escribe en español, impactante pero sin exageraciones. '
         'Devuelve UNICAMENTE un objeto JSON válido con claves: '
-        'title, script, lesson, category, fact, sources. '
+        'title, script, lesson, category, fact, sources, visuals. '
         'title: máximo 65 caracteres y una idea completa. '
         'script: entre 38 y 54 palabras, apropiado para narración de ~20 segundos; '
         'sin hashtags ni URLs. lesson: máximo 140 caracteres, una idea clara. '
         'fact: una afirmación central comprobable. '
+        'visuals: lista de EXACTAMENTE cinco frases distintas para la pantalla; '
+        'cada una de 2 a 6 palabras y máximo 38 caracteres, máximo dos líneas; '
+        'frases autónomas, claras, memorables, sin puntos suspensivos ni URLs. '
+        'Nunca copies párrafos de la narración en pantalla. '
         'sources: array de 1 a 3 URL https de organismos o estudios reputados, '
         'SOLO si conoces con certeza la dirección exacta; nunca inventes links. '
         'Si no conoces una referencia fiable exacta, devuelve sources=[]. '
@@ -409,9 +460,9 @@ def create_ai_episode(ep):
                            f'Ultimo diagnostico: {last_problem}. No se publico nada.')
     # La longitud del texto visual no debe invalidar un guion válido.
     # Mantener el contenido original para la descripción y narración.
-    visual_title = ajustar_texto_visual(data['title'], 85)
-    visual_lesson = ajustar_texto_visual(data['lesson'], 85)
-    if len(data['title']) > 85 or len(data['lesson']) > 85:
+    visual_title = ajustar_texto_visual(data['title'], 38, 6)
+    visual_lesson = ajustar_texto_visual(data['lesson'], 38, 6)
+    if len(data['title']) > 38 or len(data['lesson']) > 38:
         print('Aviso: textos visuales abreviados para la composición; guion intacto.', flush=True)
     suggested = data.get('sources', [])
     if not isinstance(suggested, list):
@@ -428,6 +479,7 @@ def create_ai_episode(ep):
         title=data['title'].strip(), script=data['script'].strip(),
         lesson=data['lesson'].strip(), visual_title=visual_title,
         visual_lesson=visual_lesson, fact=data['fact'].strip(),
+        visuals=data.get('visuals') if isinstance(data.get('visuals'), list) else None,
         source=' | '.join(sources), suggested_sources=sources,
         ai_model=body.get('model', OPENROUTER_MODEL),
         generated_at=now(), verified=False,
@@ -500,21 +552,12 @@ def scene(ep, number, dest):
     d.rounded_rectangle((52, 72, 668, 152), 24, fill=(255, 255, 255, 18), outline=(*accent, 200), width=3)
     d.text((77, 91), 'D A T A V I R A L', font=font(33, True), fill=(255, 255, 255))
     d.text((55, 187), f"{ep['id']}   /   {ep['category'].upper()}", font=font(19, True), fill=accent)
-    title = ep.get('visual_title', ajustar_texto_visual(ep['title'], 85)).rstrip(' .?!')
-    stages = [title, 'LA CLAVE', 'QUÉ SIGNIFICA', 'ÚSALO A TU FAVOR', 'RECUÉRDALO']
-    lines = wrap_text(d, stages[number], font(56, True), 600)
-    start_y = 325
-    for line in lines[:5]:
-        d.text((56, start_y), line, font=font(56, True), fill='white', stroke_width=1)
-        start_y += 79
-    script_sentences = re.split(r'(?<=[.!?])\s+', ep['script'].strip())
-    excerpts = [ep['script'].split('.')[0] + '.', *script_sentences[:3], ep.get('visual_lesson', ajustar_texto_visual(ep['lesson'], 85))]
-    excerpt = excerpts[min(number, len(excerpts)-1)][:230]
-    sublines = wrap_text(d, excerpt, font(31), 586)
-    for index, line in enumerate(sublines[:7]):
-        d.text((60, 715 + 48*index), line, font=font(31), fill=(230, 235, 249))
+    # Zona segura central: sin párrafos de narración ni frases truncadas.
+    titulares = microfrases(ep)
+    texto_centrado_seguro(d, titulares[number], centro_y=600, ancho=550, max_lineas=2)
+    d.text((76, 940), f'IDEA {number + 1} / 5', font=font(23, True), fill=accent)
     d.line((58, 1128, 662, 1128), fill=accent, width=5)
-    d.text((62, 1154), '20 SEGUNDOS. UNA IDEA QUE PERDURA.', font=font(22, True), fill='white')
+    d.text((92, 1154), 'DATO WOW  ·  20 SEGUNDOS', font=font(23, True), fill='white')
     img.save(dest, quality=92)
 
 
