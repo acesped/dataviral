@@ -308,44 +308,102 @@ def ajustar_texto_visual(texto, max_caracteres=40, max_palabras=6):
     return ' '.join(elegidas).strip(' .,:;!?¿¡') or 'DATO SORPRENDENTE'
 
 
+# Los textos son ideas completas, nunca fragmentos cortados.
+VISUAL_MIN_WORDS = 3
+VISUAL_MAX_WORDS = 9
+VISUAL_MAX_CHARS = 52
+GENERIC_VISUALS = (
+    'sabias esto', 'ahora ya lo sabes', 'dato sorprendente',
+    'descubre algo nuevo', 'una idea util', 'increible pero cierto',
+    'no te lo pierdas', 'esto te sorprendera', 'sigue aprendiendo',
+    'te imaginas', 'mira esto', 'un dato real',
+)
+VISUAL_STOP_WORDS = {
+    'a', 'al', 'ante', 'como', 'con', 'de', 'del', 'desde', 'donde',
+    'el', 'ella', 'en', 'entre', 'es', 'esa', 'ese', 'esta', 'este',
+    'hay', 'la', 'las', 'le', 'lo', 'los', 'más', 'menos', 'mi',
+    'no', 'nos', 'o', 'para', 'pero', 'por', 'porque', 'que',
+    'se', 'sin', 'su', 'sus', 'te', 'tu', 'tus', 'un', 'una', 'uno',
+    'y', 'ya', 'si', 'son', 'puede', 'pueden', 'ser', 'tiene',
+}
+
+
+def _visual_normalizado(value):
+    import unicodedata
+    text = unicodedata.normalize('NFKD', str(value).lower())
+    return ''.join(c for c in text if not unicodedata.combining(c))
+
+
+def _palabras_relevantes(value):
+    return {w for w in re.findall(r'[a-z0-9]+', _visual_normalizado(value))
+            if len(w) >= 4 and w not in VISUAL_STOP_WORDS}
+
+
+def validar_microfrases(visuals, script, title='', fact='', lesson=''):
+    """Valida significado básico y legibilidad; nunca recorta una idea.
+
+    Verifica relación léxica con el relato; no pretende garantizar exactitud
+    factual ni reemplazar una revisión editorial humana.
+    """
+    if not isinstance(visuals, list) or len(visuals) != 5:
+        raise ValueError('Se requieren cinco micromensajes relacionados con el guion')
+    universo = _palabras_relevantes(' '.join([script, title, fact, lesson]))
+    seen = set()
+    result = []
+    for index, item in enumerate(visuals, 1):
+        if not isinstance(item, str):
+            raise ValueError(f'Escena {index}: el texto no es una cadena')
+        clean = re.sub(r'\s+', ' ', item).strip().strip('"“”')
+        words = clean.split()
+        if not (VISUAL_MIN_WORDS <= len(words) <= VISUAL_MAX_WORDS):
+            raise ValueError(f'Escena {index}: requiere entre 3 y 9 palabras, tiene {len(words)}')
+        if len(clean) > VISUAL_MAX_CHARS:
+            raise ValueError(f'Escena {index}: supera 52 caracteres; reformular, no truncar')
+        if clean.endswith(('...', '…', ':', ',', ';')):
+            raise ValueError(f'Escena {index}: mensaje incompleto')
+        norm = _visual_normalizado(clean).strip(' .!?¿¡')
+        if any(generic in norm for generic in GENERIC_VISUALS):
+            raise ValueError(f'Escena {index}: frase generica sin aprendizaje')
+        if norm in seen:
+            raise ValueError(f'Escena {index}: texto repetido')
+        seen.add(norm)
+        if not (_palabras_relevantes(clean) & universo):
+            raise ValueError(f'Escena {index}: no se identifica relación con el contenido narrado')
+        result.append(clean)
+    return result
+
+
 def microfrases(ep):
-    """Cinco titulares, nunca el texto completo de la narración."""
-    ai = ep.get('visuals')
-    if isinstance(ai, list) and len(ai) == 5 and all(isinstance(v, str) and v.strip() for v in ai):
-        raw = ai
-    else:
-        raw = [ep.get('title', ''), '¿SABÍAS ESTO?',
-               ep.get('fact', '') or 'UN DATO REAL',
-               ep.get('lesson', '') or 'UNA IDEA ÚTIL',
-               'AHORA YA LO SABES']
-    return [ajustar_texto_visual(v, 38, 6).upper() for v in raw]
+    """Cinco mensajes completos que expresan conocimiento, no títulos vacíos."""
+    return validar_microfrases(
+        ep.get('visuals'), ep.get('script', ''), ep.get('title', ''),
+        ep.get('fact', ''), ep.get('lesson', ''),
+    )
 
 
-def texto_centrado_seguro(draw, texto, *, centro_y, ancho=550, max_lineas=2):
-    """Dibuja en el rectángulo central sin salirse ni cortar renglones."""
-    texto = ajustar_texto_visual(texto, 38, 6).upper()
-    for tam in range(66, 30, -2):
+def texto_centrado_seguro(draw, texto, *, centro_y, ancho=560, max_lineas=3):
+    """Adapta fuente y saltos sin acortar el mensaje ni cortarlo en pantalla."""
+    for tam in range(66, 27, -2):
         fuente = font(tam, True)
-        lineas = wrap_text(draw, texto, fuente, ancho)
-        if len(lineas) > max_lineas:
+        lineas = wrap_text(draw, texto.upper(), fuente, ancho)
+        if not lineas or len(lineas) > max_lineas:
             continue
-        medidas = [draw.textbbox((0, 0), lin, font=fuente, stroke_width=1) for lin in lineas]
-        if any((b[2] - b[0]) > ancho for b in medidas):
+        cajas = [draw.textbbox((0, 0), lin, font=fuente, stroke_width=1) for lin in lineas]
+        if any((b[2] - b[0]) > ancho for b in cajas):
             continue
-        salto = tam + 18
+        salto = tam + 17
         alto = len(lineas) * salto
-        if alto > 240:
+        if alto > 320:
             continue
         y = centro_y - alto // 2
         for linea in lineas:
             caja = draw.textbbox((0, 0), linea, font=fuente, stroke_width=1)
             x = (720 - (caja[2] - caja[0])) / 2
             draw.text((x, y), linea, font=fuente, fill=(255,255,255),
-                      stroke_width=1, stroke_fill=(4, 7, 22))
+                      stroke_width=1, stroke_fill=(4,7,22))
             y += salto
         return
-    raise ValueError('No es posible componer un titular dentro de la zona segura')
-
+    raise ValueError('El micromensaje no cabe en la zona segura sin recortes')
 
 
 OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models'
@@ -419,8 +477,9 @@ def _normalize_ai_fields(data):
     visuals = data.get('visuals')
     if not isinstance(visuals, list) or len(visuals) != 5 or not all(isinstance(v, str) and v.strip() for v in visuals):
         raise ValueError('Deben existir cinco frases visuales')
-    # El renderizador controla la composición, no altera la narración.
-    data['visuals'] = [ajustar_texto_visual(v, 38, 6) for v in visuals]
+    # Rechazar frases genéricas o incompletas; no truncar conceptos.
+    data['visuals'] = validar_microfrases(visuals, data['script'], data['title'],
+                                          data['fact'], data['lesson'])
     if not isinstance(data.get('sources'), list):
         data['sources'] = []
     return data
@@ -478,7 +537,14 @@ def create_ai_episode(ep):
         'Usa exactamente estas claves: title, script, lesson, fact, visuals, sources. '
         'title: título muy corto. script: 38 a 54 palabras en un párrafo. '
         'lesson y fact: una frase breve cada uno. '
-        'visuals: arreglo de EXACTAMENTE 5 frases, 2 a 6 palabras, máximo 38 caracteres por frase. '
+        'visuals: EXACTAMENTE 5 MICROMENSAJES que enseñen hechos o consecuencias '
+        'específicas del script; cada uno debe tener de 3 a 9 palabras y hasta 52 caracteres. '
+        'Cada visual corresponde en orden a una parte del relato (inicio, mecanismo, '
+        'consecuencia, contraste, aprendizaje). Cada frase debe compartir al menos '
+        'una palabra relevante con script/title/fact/lesson. '
+        'Redacta afirmaciones autosuficientes, concretas y completas: NO títulos, '
+        'NO preguntas vacías, NO eslóganes como ¿Sabías esto?, NO repitas frases. '
+        'Si una frase excede el límite, REESCRÍBELA desde cero sin quitar el sentido. '
         'sources: [] si no tienes referencias comprobables; no inventes URLs. '
         'Evita consejos médicos, legales o de emergencia no corroborados. '
         'No agregues otros campos. '
@@ -580,8 +646,8 @@ def create_ai_episode(ep):
     result.update(
         title=data['title'].strip(), script=data['script'].strip(),
         lesson=data['lesson'].strip(), fact=data['fact'].strip(),
-        visual_title=ajustar_texto_visual(data['title'], 38, 6),
-        visual_lesson=ajustar_texto_visual(data['lesson'], 38, 6),
+        visual_title=data['visuals'][0],
+        visual_lesson=data['visuals'][4],
         visuals=data['visuals'], source=' | '.join(sources),
         suggested_sources=sources, ai_model=used_model,
         generated_at=now(), verified=False,
@@ -707,7 +773,7 @@ def scene(ep, number, dest):
     d.text((55, 187), ep['category'].upper(), font=font(19, True), fill=accent)
     # Zona segura central: sin párrafos de narración ni frases truncadas.
     titulares = microfrases(ep)
-    texto_centrado_seguro(d, titulares[number], centro_y=600, ancho=550, max_lineas=2)
+    texto_centrado_seguro(d, titulares[number], centro_y=610, ancho=560, max_lineas=3)
     d.line((58, 1128, 662, 1128), fill=accent, width=5)
     d.text((92, 1154), 'DATO WOW  ·  20 SEGUNDOS', font=font(23, True), fill='white')
     img.save(dest, quality=92)
