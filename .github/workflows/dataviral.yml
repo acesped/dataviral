@@ -14,7 +14,7 @@ on:
         default: false
         type: boolean
       auto_publish:
-        description: 'Permitir publicacion con verificacion automatica, sin revision humana'
+        description: 'Publicacion autonoma; tambien se activa si publish=true y episode_id esta vacio'
         required: true
         default: false
         type: boolean
@@ -103,8 +103,12 @@ jobs:
             [[ -n "${INSTAGRAM_TOKEN:-}" && -n "${INSTAGRAM_USER_ID:-}" ]] || { echo '::error::Faltan secretos de Instagram'; exit 1; }
             [[ "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]] || { echo '::error::INSTAGRAM_USER_ID no es numerico'; exit 1; }
             [[ -n "${IG_EXPECTED_USERNAME:-}" ]] || { echo '::error::IG_EXPECTED_USERNAME vacio incluso tras aplicar respaldo'; exit 1; }
-            if [[ "$AUTO" != true ]]; then
-              [[ -n "$EPISODE" && "$EPISODE" == "$APPROVED" ]] || { echo '::error::Confirmar ID de episodio, o activar auto_publish'; exit 1; }
+            # Si no se especifica ID, el flujo elige uno pendiente y autoriza
+            # esa seleccion automaticamente (no exige approved_id).
+            if [[ -z "$EPISODE" ]]; then
+              echo "Modo autonomo: se seleccionara un episodio pendiente de forma aleatoria y equilibrada."
+            elif [[ "$AUTO" != true ]]; then
+              [[ "$EPISODE" == "$APPROVED" ]] || { echo '::error::Con ID especifico, confirma approved_id o activa auto_publish'; exit 1; }
             fi
           fi
       - name: Confirmar modelo gratuito OpenRouter
@@ -132,7 +136,11 @@ jobs:
           args=()
           if [[ -n "$EPISODE" ]]; then args+=(--episode "$EPISODE"); fi
           if [[ "$PUBLISH" == true ]]; then args+=(--publish); fi
-          if [[ "$AUTO" == true ]]; then args+=(--auto-publish); fi
+          # Con publicacion y sin episodio se habilita la seleccion autonoma,
+          # incluso si auto_publish no se marco en la interfaz.
+          if [[ "$AUTO" == true || ( "$PUBLISH" == true && -z "$EPISODE" ) ]]; then
+            args+=(--auto-publish)
+          fi
           if [[ -n "$APPROVED" ]]; then args+=(--approved-id "$APPROVED"); fi
           python dataviral.py "${args[@]}"
       - name: Guardar guion y MP4
