@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """DataViral: catálogo integrado (500 propuestas), previews y publicación de VIDEO en Reels y feed de IG.
 
-No publica sin aprobación editorial explícita. Solo tres episodios poseen guion
-piloto con fuente inicial. Revalidar sus afirmaciones antes de aprobar.
+Las referencias son opcionales; la ausencia de fuentes no impide publicar.
+Los datos generados por IA no están verificados independientemente.
+Para contenido sensible, mantener revisión humana antes de publicar.
 Python 3.11+. Dependencias en requirements.txt; ffmpeg instalado por workflow.
 """
 from __future__ import annotations
@@ -294,8 +295,8 @@ def create_ai_episode(ep):
         'fact: una afirmación central comprobable. '
         'sources: array de 1 a 3 URL https de organismos o estudios reputados, '
         'SOLO si conoces con certeza la dirección exacta; nunca inventes links. '
-        'Si no conoces una referencia fiable exacta, devuelve sources=[]: '
-        'el episodio quedará bloqueado para publicación. '
+        'Si no conoces una referencia fiable exacta, devuelve sources=[]. '
+        'La falta de enlaces no bloquea el episodio. '
         'Evita consejos médicos o de emergencia no contextualizados y '
         'afirmaciones pseudocientíficas. '
         f"Tema: {ep.get('title')}. "
@@ -514,11 +515,9 @@ def render(ep, out: Path, require_voice=False):
     out.mkdir(parents=True, exist_ok=True)
     if not ep.get('script'):
         raise ValueError(f"{ep['id']}: propuesta sin guion; no se puede producir")
-    # Las fuentes NO son un requisito del renderizado: una vista previa sirve
-    # precisamente para revisar guiones aun cuando la IA no proponga enlaces.
-    # La publicacion sigue bloqueada por publish() si faltan referencias.
+    # Las fuentes son metadatos opcionales; no bloquean video ni publicacion.
     if not ep.get('source'):
-        print(f"AVISO: {ep['id']} sin fuentes propuestas. Se generara solo vista previa; publicacion bloqueada.", flush=True)
+        print(f"AVISO: {ep['id']} sin fuentes propuestas; contenido no verificado independientemente.", flush=True)
     folder = out / ep['id']
     folder.mkdir(parents=True, exist_ok=True)
     frames = []
@@ -643,8 +642,10 @@ def publish_container(user_id, token, video_url, caption):
 def publish(ep, movie, cover, approval):
     if approval != ep['id']:
         raise ValueError('Se exige aprobación explícita del mismo ID de episodio')
-    if not ep['source'] or not ep['script']:
-        raise ValueError('Publicación bloqueada: faltan guion o enlaces de referencia propuestos')
+    if not ep.get('script'):
+        raise ValueError('Publicación bloqueada: falta el guion narrado')
+    if not ep.get('source'):
+        print('AVISO: publicación sin enlaces de referencia; la IA no ha verificado los hechos.', flush=True)
     token = credential('INSTAGRAM_TOKEN', TEST_INSTAGRAM_TOKEN)
     user_id = credential('INSTAGRAM_USER_ID', TEST_INSTAGRAM_USER_ID)
     if not user_id.isdigit():
@@ -680,7 +681,10 @@ def publish(ep, movie, cover, approval):
     response = requests.get(video_url, timeout=60)
     if not response.ok or len(response.content) != movie.stat().st_size:
         raise RuntimeError(f'MP4 no accesible públicamente: HTTP {response.status_code}')
-    caption = f'{ep["title"]}\n\n{ep["lesson"]}\n\nFuente: {ep["source"]}\n\n#DataViral #AprendeAlgoNuevo'
+    caption = f'{ep["title"]}\n\n{ep["lesson"]}'
+    if ep.get('source'):
+        caption += f'\n\nReferencias sugeridas (no verificadas): {ep["source"]}'
+    caption += '\n\n#DatoWow #AprendeAlgoNuevo'
     state['episodes'][ep['id']] = row
     row['reel'] = 'enviando'
     row['updated_at'] = now()
@@ -732,14 +736,11 @@ def main():
         json.dumps(generated,ensure_ascii=False,indent=2),encoding='utf-8')
     print(f"Guion OpenRouter creado: {ep['id']}; referencias propuestas: {generated['source'] or 'ninguna'}")
     if args.publish and not generated.get('source'):
-        raise RuntimeError(
-            'Publicacion bloqueada: OpenRouter no propuso fuentes. '
-            'El guion JSON se guardo para revision, pero no se publicara sin referencias.'
-        )
+        print('AVISO: el guion no tiene fuentes; se permite publicar, pero no existe verificación independiente.', flush=True)
     movie,cover=render(generated,out,require_voice=args.publish)
     if args.publish:
-        # Los enlaces son sugerencias de IA, NO evidencias verificadas.
-        # El flag --auto-publish acepta conscientemente ese riesgo.
+        # Los enlaces son opcionales y nunca equivalen a verificación independiente.
+        # --auto-publish implica riesgo de errores factuales de la IA.
         publish(generated,movie,cover,generated['id'])
     else:
         print('VISTA PREVIA: no se publicó el video')
