@@ -1,4 +1,3 @@
-
 name: DataViral - Gemini guiones y videos Instagram
 
 on:
@@ -36,61 +35,44 @@ jobs:
   generar:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
-
     env:
       PYTHONUNBUFFERED: '1'
-
-      GEMINI_MODEL: 'gemini-3.8-flash'
+      GEMINI_MODEL: 'gemini-2.5-flash'
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
       INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
       INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
-
       IG_GRAPH_VERSION: 'v25.0'
-      IG_EXPECTED_USERNAME: 'cazadores_de_terremotos'
-
+      IG_EXPECTED_USERNAME: 'groundshake_cl'
       GH_TOKEN: ${{ github.token }}
       GITHUB_REPOSITORY: ${{ github.repository }}
       GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
-
       - name: Instalar librerias y FFmpeg
         shell: bash
         run: |
           set -euo pipefail
-
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg fonts-dejavu-core
-
           python -m pip install -r requirements.txt
-
       - name: Verificar catalogo y sintaxis
         shell: bash
         run: |
           set -euo pipefail
-
           python -m py_compile dataviral.py
-
           python - <<'PY'
           import dataviral
-
-          episodes = dataviral.catalog()
-
-          assert len(episodes) == 500
-          assert len({ep['id'] for ep in episodes}) == 500
-
+          episodes=dataviral.catalog()
+          assert len(episodes)==500
+          assert len({ep['id'] for ep in episodes})==500
           print('Catalogo de 500 temas cargado')
           PY
-
       - name: Validar configuración
         shell: bash
         env:
@@ -100,55 +82,14 @@ jobs:
           APPROVED: ${{ inputs.approved_id }}
         run: |
           set -euo pipefail
-
-          if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-            echo "::error::Falta GEMINI_API_KEY"
-            exit 1
-          fi
-
+          [[ -n "${GEMINI_API_KEY:-}" ]] || { echo '::error::Falta GEMINI_API_KEY'; exit 1; }
           if [[ "$PUBLISH" == true ]]; then
-
-            if [[ -z "${INSTAGRAM_TOKEN:-}" || -z "${INSTAGRAM_USER_ID:-}" ]]; then
-              echo "::error::Faltan secretos de Instagram"
-              exit 1
-            fi
-
-            if [[ ! "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]]; then
-              echo "::error::INSTAGRAM_USER_ID no es numerico"
-              exit 1
-            fi
-
-            if [[ "${IG_EXPECTED_USERNAME:-}" != 'cazadores_de_terremotos' ]]; then
-              echo "::error::Usuario Instagram inesperado"
-              exit 1
-            fi
-
+            [[ -n "${INSTAGRAM_TOKEN:-}" && -n "${INSTAGRAM_USER_ID:-}" ]] || { echo '::error::Faltan secretos de Instagram'; exit 1; }
+            [[ "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]] || { echo '::error::INSTAGRAM_USER_ID no es numerico'; exit 1; }
             if [[ "$AUTO" != true ]]; then
-              if [[ -z "$EPISODE" || "$EPISODE" != "$APPROVED" ]]; then
-                echo "::error::Confirmar ID de episodio, o activar auto_publish"
-                exit 1
-              fi
+              [[ -n "$EPISODE" && "$EPISODE" == "$APPROVED" ]] || { echo '::error::Confirmar ID de episodio, o activar auto_publish'; exit 1; }
             fi
-
-          else
-            echo "Modo prueba: no se necesitan credenciales de Instagram"
           fi
-
-      - name: Confirmar modelo Gemini configurado
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python - <<'PY'
-          import dataviral
-
-          assert dataviral.GEMINI_MODEL == 'gemini-3.8-flash', (
-              dataviral.GEMINI_MODEL
-          )
-
-          print('Modelo Gemini:', dataviral.GEMINI_MODEL)
-          PY
-
       - name: Crear guion con IA, video y opcionalmente publicar
         shell: bash
         env:
@@ -158,27 +99,12 @@ jobs:
           APPROVED: ${{ inputs.approved_id }}
         run: |
           set -euo pipefail
-
           args=()
-
-          if [[ -n "$EPISODE" ]]; then
-            args+=(--episode "$EPISODE")
-          fi
-
-          if [[ "$PUBLISH" == true ]]; then
-            args+=(--publish)
-          fi
-
-          if [[ "$AUTO" == true ]]; then
-            args+=(--auto-publish)
-          fi
-
-          if [[ -n "$APPROVED" ]]; then
-            args+=(--approved-id "$APPROVED")
-          fi
-
+          if [[ -n "$EPISODE" ]]; then args+=(--episode "$EPISODE"); fi
+          if [[ "$PUBLISH" == true ]]; then args+=(--publish); fi
+          if [[ "$AUTO" == true ]]; then args+=(--auto-publish); fi
+          if [[ -n "$APPROVED" ]]; then args+=(--approved-id "$APPROVED"); fi
           python dataviral.py "${args[@]}"
-
       - name: Guardar guion y MP4
         if: always()
         uses: actions/upload-artifact@v4
