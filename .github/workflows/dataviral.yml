@@ -42,7 +42,7 @@ jobs:
       INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
       INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
       IG_GRAPH_VERSION: 'v25.0'
-      IG_EXPECTED_USERNAME: 'cazadores_de_terremotos'
+      IG_EXPECTED_USERNAME: 'datos_wow_'
       GH_TOKEN: ${{ github.token }}
       GITHUB_REPOSITORY: ${{ github.repository }}
       GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
@@ -93,7 +93,7 @@ jobs:
           if [[ "$PUBLISH" == true ]]; then
             [[ -n "${INSTAGRAM_TOKEN:-}" && -n "${INSTAGRAM_USER_ID:-}" ]] || { echo '::error::Faltan secretos de Instagram'; exit 1; }
             [[ "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]] || { echo '::error::INSTAGRAM_USER_ID no es numerico'; exit 1; }
-            [[ "${IG_EXPECTED_USERNAME:-}" == 'cazadores_de_terremotos' ]] || { echo '::error::Usuario Instagram inesperado'; exit 1; }
+            [[ "${IG_EXPECTED_USERNAME:-}" == 'datos_wow_' ]] || { echo '::error::Usuario Instagram inesperado'; exit 1; }
             if [[ "$AUTO" != true ]]; then
               [[ -n "$EPISODE" && "$EPISODE" == "$APPROVED" ]] || { echo '::error::Confirmar ID de episodio, o activar auto_publish'; exit 1; }
             fi
@@ -114,7 +114,7 @@ jobs:
           OPENROUTER_MODEL: 'openrouter/free'
           INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
           INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
-          IG_EXPECTED_USERNAME: 'cazadores_de_terremotos'
+          IG_EXPECTED_USERNAME: 'datos_wow_'
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
