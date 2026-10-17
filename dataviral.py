@@ -591,26 +591,37 @@ def _free_prompt(ep, mode):
     return instruction + ' ' + content
 
 
-def _openrouter_text(key, model, prompt, *, max_tokens=1100):
-    """Una solicitud corta; devuelve texto o falla sin ocultar el diagnóstico."""
+def _openrouter_text(key, model, prompt, *, max_tokens=2600):
+    """Obtiene texto visible sin perder una respuesta útil por finish_reason=length.
+
+    Desactiva el razonamiento cuando lo admite el proveedor: algunos modelos
+    gratuitos consumen su presupuesto en tokens internos. Ante 400 por un
+    parámetro no soportado, reintenta la MISMA solicitud sin él.
+    """
     headers = {
         'Authorization': f'Bearer {key}',
         'Content-Type': 'application/json',
         'HTTP-Referer': 'https://github.com',
         'X-Title': 'Dato Wow - DataViral',
     }
-    payload = {
+    base = {
         'model': model,
         'messages': [
-            {'role': 'system', 'content': 'Responde en español. Solo el formato pedido. Sin comentarios adicionales.'},
+            {'role': 'system', 'content': 'Español. Entrega únicamente las líneas solicitadas. No expliques ni razones.'},
             {'role': 'user', 'content': prompt},
         ],
         'temperature': 0.2,
         'max_tokens': max_tokens,
         'stream': False,
     }
-    # No forzar JSON schema ni parámetros no compatibles con proveedores gratuitos.
+    payload = dict(base)
+    payload['reasoning'] = {'effort': 'none', 'exclude': True}
     response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=130)
+    # Los modelos gratuitos no comparten todos los parámetros de razonamiento.
+    if response.status_code in (400, 422) and any(
+        word in response.text.lower() for word in ('reasoning', 'effort', 'unsupported parameter', 'unrecognized')
+    ):
+        response = requests.post(OPENROUTER_URL, headers=headers, json=base, timeout=130)
     if response.status_code == 429:
         kind = classify_openrouter_429(response)
         if kind == 'account':
@@ -619,7 +630,7 @@ def _openrouter_text(key, model, prompt, *, max_tokens=1100):
     if response.status_code in (401, 403):
         raise RuntimeError('OpenRouter rechazó la credencial o el acceso a la API')
     if not response.ok:
-        raise ValueError(f'HTTP {response.status_code}: {response.text[:150]}')
+        raise ValueError(f'HTTP {response.status_code}: {response.text[:170]}')
     body = response.json()
     choice = (body.get('choices') or [{}])[0]
     finish = choice.get('finish_reason')
@@ -627,10 +638,11 @@ def _openrouter_text(key, model, prompt, *, max_tokens=1100):
     content = message.get('content') or ''
     if isinstance(content, list):
         content = ''.join(part.get('text', '') for part in content if isinstance(part, dict))
-    if finish == 'length':
-        raise ValueError('respuesta truncada por límite de tokens')
     if not isinstance(content, str) or not content.strip():
-        raise ValueError('modelo sin texto visible')
+        reason = 'respuesta truncada: el modelo consumió todos los tokens sin texto visible' if finish == 'length' else 'modelo sin texto visible'
+        raise ValueError(reason)
+    # finish_reason=length no implica automáticamente que el contenido esté
+    # incompleto. El analizador de cada etapa es quien valida su integridad.
     return content.strip()
 
 
@@ -739,8 +751,7 @@ def create_ai_episode(ep):
     narration_prompt = (
         'Redacta un guion educativo sorprendente pero preciso, con ENTRE 38 Y 54 PALABRAS '
         'en español para narrar en 20 segundos. Forma CINCO oraciones completas ' 
-        'de entre 7 y 10 palabras cada una, preferiblemente hasta 52 caracteres ' 
-        'por oración; deben avanzar de causa a conclusión y ser comprensibles ' 
+        'de 7 a 11 palabras; deben avanzar de causa a conclusión y ser comprensibles ' 
         'por sí solas. Sin cifras inventadas, sin introducciones vacías, '
         'sin consejos médicos o de emergencia no verificados. Responde SOLO cuatro líneas, '
         'sin Markdown: TITULO: ...\nGUION: ...\nDATO: ...\nLECCION: ...\n' + intro
@@ -750,7 +761,7 @@ def create_ai_episode(ep):
     last_problem = 'sin respuesta'
     for model, _ in candidates:
         try:
-            raw = _openrouter_text(key, model, narration_prompt, max_tokens=1200)
+            raw = _openrouter_text(key, model, narration_prompt, max_tokens=2800)
             narration = _parse_narration(raw)
             narration_model = model
             print(f'Narración validada con {model}', flush=True)
@@ -783,7 +794,7 @@ def create_ai_episode(ep):
     visual_candidates = sorted(candidates, key=lambda row: row[0] != narration_model)
     for model, _ in visual_candidates:
         try:
-            raw = _openrouter_text(key, model, visuals_prompt, max_tokens=1050)
+            raw = _openrouter_text(key, model, visuals_prompt, max_tokens=1900)
             proposed = _parse_five_visuals(raw)
             visuals = validar_microfrases(proposed, narration['script'],
                                            narration['title'], narration['fact'], narration['lesson'])
