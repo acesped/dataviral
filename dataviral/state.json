@@ -8,8 +8,10 @@
       "reel_id": "18108436949360425"
     },
     "DV-002": {
-      "reel": "enviando",
-      "updated_at": "2026-10-17T03:12:23.502164+00:00"
+      "reel": "publicado",
+      "updated_at": "2026-10-17T03:13:02.126282+00:00",
+      "share_to_feed": true,
+      "reel_id": "18219992017348147"
     }
   }
 }
