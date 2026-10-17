@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """DataViral: catálogo integrado (500 propuestas), previews y publicación de VIDEO en Reels y feed de IG.
 
@@ -213,10 +212,18 @@ uEensT?emG$FN^TgHmQpMoi>kT$>+WN`sLrh#utpt?g@SaX&18u;)*3(34*+Q0GyRly@Es9<Mm!cS5`a
 rz0Kg9GvmPSOc(kPVGQJ5h8&orPUPyGb$~7gQRS&>qmlm>Q|F^@%xZU)S{2z(8G(6yhG(!zZ-ppLs4KS~JUc$$R9#6(Qg?7?v6v0~fB!%6wD2t"""
 # VALORES HARDCODE PARA PRUEBAS LOCALES (ficticios, nunca credenciales reales).
 # Los secretos de GitHub prevalecen sobre estos valores.
-TEST_GEMINI_API_KEY = "AQ.Ab8RN6Kjj0zRp52us6LoVcaaT2QG1f30IoEYAg2kg1P293-qdg"
-TEST_INSTAGRAM_TOKEN = "IGAAWozCerZCk5BZAFl4Y0R6WmRzMVA4NU1ob3dWMmQ2dU9BeWhyUnIwS0JMOEhSWDk1VEpDcXA2amVCYU83bGVtU3QyR1JlVFBjMXZAyWV9QUjlyZA3BTeE5mV1dYN1g1Y3ZAPMXBCTWJwblRwc2ZArckdSOHlUeUxEYWQ4aGdJUkdKbwZDZD"
-TEST_INSTAGRAM_USER_ID = "17841408081948792"
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+TEST_GEMINI_API_KEY = "PON_AQUI_TU_CLAVE_DE_PRUEBA"
+TEST_INSTAGRAM_TOKEN = "PON_AQUI_TU_TOKEN_DE_PRUEBA"
+TEST_INSTAGRAM_USER_ID = "00000000000000000"
+# El workflow antiguo exportaba gemini-2.5-flash: se sustituye automáticamente
+# por el modelo vigente, incluso cuando no se ha actualizado el YAML.
+GEMINI_MODEL_REQUESTED = os.getenv('GEMINI_MODEL', 'gemini-3.8-flash').strip()
+GEMINI_MODEL = ('gemini-3.8-flash' if GEMINI_MODEL_REQUESTED in
+                ('', 'gemini-2.5-flash', 'models/gemini-2.5-flash')
+                else GEMINI_MODEL_REQUESTED.removeprefix('models/'))
+if GEMINI_MODEL != GEMINI_MODEL_REQUESTED:
+    print(f'Modelo heredado {GEMINI_MODEL_REQUESTED!r} sustituido por {GEMINI_MODEL}', flush=True)
+
 GRAPH_VERSION = os.getenv('IG_GRAPH_VERSION', 'v25.0')
 
 def credential(name, demo):
@@ -257,6 +264,22 @@ def create_ai_episode(ep):
                'generationConfig':{'temperature':0.55,'maxOutputTokens':1500}}
     response = requests.post(url, headers={'x-goog-api-key':key},json=payload,timeout=100)
     if not response.ok:
+        if response.status_code == 404:
+            raise RuntimeError(
+                f'Gemini HTTP 404: el modelo {GEMINI_MODEL!r} no está disponible '
+                'para esta cuenta. Verifica los modelos habilitados en Google AI '
+                'Studio y configura GEMINI_MODEL. Detalle: '
+                f'{response.text[:350]}')
+        if response.status_code in (401, 403):
+            raise RuntimeError(
+                f'Gemini HTTP {response.status_code}: verifica la API key y '
+                'permisos del proyecto. Detalle: '
+                f'{response.text[:350]}')
+        if response.status_code == 429:
+            raise RuntimeError(
+                'Gemini HTTP 429: cuota excedida o límite de solicitudes. '
+                'No se reintentará con modelos de pago automáticamente. '
+                f'Detalle: {response.text[:350]}')
         raise RuntimeError(f'Gemini HTTP {response.status_code}: {response.text[:500]}')
     obj=response.json()
     if not obj.get('candidates'):
