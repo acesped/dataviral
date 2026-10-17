@@ -241,16 +241,39 @@ def catalog():
 
 
 def _parse_ai_json(text):
-    """Extrae un objeto JSON incluso si el modelo lo devuelve con fences."""
-    text = text.strip()
-    text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text, flags=re.I).strip()
+    """Parsea un objeto JSON completo; admite fences y texto envolvente.
+
+    No intenta cerrar comillas ni fabricar campos de un JSON truncado.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError('Respuesta sin texto JSON')
+    cleaned = text.strip()
+    fenced = re.fullmatch(r'```(?:json)?\s*([\s\S]*?)\s*```', cleaned, flags=re.I)
+    if fenced:
+        cleaned = fenced.group(1).strip()
     try:
-        return json.loads(text)
+        value = json.loads(cleaned)
     except json.JSONDecodeError:
-        start, end = text.find('{'), text.rfind('}')
-        if start < 0 or end < start:
-            raise RuntimeError('OpenRouter no devolvió un objeto JSON')
-        return json.loads(text[start:end+1])
+        start = cleaned.find('{')
+        if start < 0:
+            raise
+        value, end = json.JSONDecoder().raw_decode(cleaned[start:])
+        rest = cleaned[start + end:].strip()
+        if rest and not rest.startswith('```'):
+            raise ValueError('Texto inesperado después del JSON')
+    if not isinstance(value, dict):
+        raise ValueError('OpenRouter debe devolver un objeto JSON')
+    return value
+
+
+def _validate_ai_data(data):
+    for field in ('title', 'script', 'lesson', 'fact'):
+        if not isinstance(data.get(field), str) or not data[field].strip():
+            raise ValueError(f'Guion de IA sin campo requerido: {field}')
+    words = len(data['script'].split())
+    if not 38 <= words <= 54:
+        raise ValueError(f'Duración incompatible: {words} palabras (38-54 requeridas)')
+    return data
 
 
 def ajustar_texto_visual(texto, max_caracteres=85):
@@ -319,62 +342,71 @@ def create_ai_episode(ep):
         'HTTP-Referer': 'https://github.com',
         'X-Title': 'Dato Wow - DataViral',
     }
-    # El router gratuito puede elegir modelos con razonamiento extenso. Una
-    # respuesta HTTP 200 puede traer content vacio cuando el presupuesto de
-    # tokens se agota en razonamiento. Reintentar una vez con mayor presupuesto;
-    # nunca usar modelos de pago ni publicar contenido inexistente.
-    for attempt in range(2):
-        response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=140)
+    # Tres intentos máximo; solo modelos gratuitos. No publicar si el JSON
+    # está incompleto, truncado o incumple los campos necesarios.
+    data = None
+    body = {}
+    last_problem = 'respuesta no disponible'
+    for attempt in range(3):
+        payload['max_tokens'] = (3200, 6400, 6400)[attempt]
+        if attempt:
+            payload['messages'][0]['content'] = (
+                'Devuelve UNICAMENTE JSON valido, compacto y completo. '
+                'No uses Markdown, ni introducciones. Evita razonamiento extenso. '
+                'Respeta exactamente los campos y 38-54 palabras en script.'
+            )
+        try:
+            response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=140)
+        except requests.RequestException as exc:
+            last_problem = f'Error de red ({type(exc).__name__})'
+            print(f'OpenRouter intento {attempt+1}/3: {last_problem}', flush=True)
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+                continue
+            break
         if not response.ok:
             detail = response.text[:500]
             if response.status_code == 429:
-                raise RuntimeError('OpenRouter Free HTTP 429: cuota o límite temporal agotado. '
-                                   'No se usarán modelos de pago. ' + detail)
+                raise RuntimeError('OpenRouter Free HTTP 429: cuota agotada o limite temporal. '
+                                   'No se usaran modelos de pago. ' + detail)
             if response.status_code in (401, 403):
-                raise RuntimeError('OpenRouter Free: revisa OPENROUTER_API_KEY y permisos. ' + detail)
-            raise RuntimeError(f'OpenRouter Free HTTP {response.status_code}: {detail}')
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise RuntimeError('OpenRouter devolvió JSON HTTP inválido') from exc
-        choices = body.get('choices') or []
-        choice = choices[0] if choices else {}
-        message = choice.get('message') or {}
-        raw = message.get('content')
-        if isinstance(raw, list):
-            raw = ''.join(part.get('text', '') for part in raw
-                          if isinstance(part, dict) and part.get('type') in (None, 'text'))
-        if isinstance(raw, str) and raw.strip():
-            break
-        finish_reason = choice.get('finish_reason', 'sin_finish_reason')
-        usage = body.get('usage') or {}
-        details = usage.get('completion_tokens_details') or {}
-        model_used = body.get('model', 'desconocido')
-        print(f'OpenRouter: respuesta sin texto; intento {attempt+1}/2, '
-              f'modelo={model_used}, finish_reason={finish_reason}, '
-              f'tokens_generados={usage.get("completion_tokens", "?")}, '
-              f'tokens_razonamiento={details.get("reasoning_tokens", "?")}',
-              flush=True)
-        if attempt == 0:
-            payload['max_tokens'] = 6400
-            # Preserva el requisito de responder JSON, pero pide una respuesta
-            # corta y directa con margen suficiente para modelos razonadores.
-            payload['messages'][0]['content'] += ' Responde directamente; usa poco razonamiento.'
+                raise RuntimeError('OpenRouter Free: revisa OPENROUTER_API_KEY. ' + detail)
+            if response.status_code not in (500, 502, 503, 504):
+                raise RuntimeError(f'OpenRouter Free HTTP {response.status_code}: {detail}')
+            last_problem = f'HTTP {response.status_code}'
+            print(f'OpenRouter intento {attempt+1}/3: {last_problem}', flush=True)
         else:
-            raise RuntimeError(
-                'OpenRouter devolvió dos respuestas sin texto. '
-                'Prueba otro modelo :free disponible o reintenta más tarde; '
-                'no se generó ni publicó video.'
-            )
-    data = _parse_ai_json(raw)
-    if not isinstance(data, dict):
-        raise RuntimeError('La respuesta de IA no es un objeto JSON')
-    for field in ('title', 'script', 'lesson', 'fact'):
-        if not isinstance(data.get(field), str) or not data[field].strip():
-            raise RuntimeError(f'Guion de IA sin campo requerido: {field}')
-    words = len(data['script'].split())
-    if not 38 <= words <= 54:
-        raise RuntimeError(f'Duración incompatible: {words} palabras (38-54 requeridas)')
+            try:
+                body = response.json()
+                choices = body.get('choices') or []
+                choice = choices[0] if choices else {}
+                message = choice.get('message') or {}
+                raw = message.get('content')
+                if isinstance(raw, list):
+                    raw = ''.join(part.get('text', '') for part in raw
+                                  if isinstance(part, dict) and part.get('type') in (None, 'text'))
+                finish_reason = choice.get('finish_reason', 'desconocido')
+                usage = body.get('usage') or {}
+                if finish_reason == 'length':
+                    last_problem = 'respuesta truncada (finish_reason=length)'
+                else:
+                    try:
+                        data = _validate_ai_data(_parse_ai_json(raw))
+                        break
+                    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                        last_problem = f'JSON/guion invalido: {str(exc)[:170]}'
+                print(f'OpenRouter intento {attempt+1}/3: {last_problem}; '
+                      f'modelo={body.get("model", "desconocido")}; '
+                      f'finish_reason={finish_reason}; '
+                      f'tokens={usage.get("completion_tokens", "?")}', flush=True)
+            except (ValueError, TypeError) as exc:
+                last_problem = f'Respuesta HTTP no JSON: {type(exc).__name__}'
+                print(f'OpenRouter intento {attempt+1}/3: {last_problem}', flush=True)
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))
+    if data is None:
+        raise RuntimeError('OpenRouter no genero un guion JSON valido tras tres intentos. '
+                           f'Ultimo diagnostico: {last_problem}. No se publico nada.')
     # La longitud del texto visual no debe invalidar un guion válido.
     # Mantener el contenido original para la descripción y narración.
     visual_title = ajustar_texto_visual(data['title'], 85)
