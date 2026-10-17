@@ -724,10 +724,22 @@ def publish(ep, movie, cover, approval):
     user_id = credential('INSTAGRAM_USER_ID', TEST_INSTAGRAM_USER_ID)
     if not user_id.isdigit():
         raise ValueError('INSTAGRAM_USER_ID debe ser numérico')
-    me = ig_api('GET', 'me', token=token, data={'fields':'id,username'})
-    expected = os.getenv('IG_EXPECTED_USERNAME', '').strip().lower().lstrip('@')
-    if str(me.get('id')) != user_id or (expected and me.get('username','').lower() != expected):
-        raise RuntimeError(f'Cuenta Instagram diferente de la esperada: {me}')
+    # La cuenta autorizada se define exclusivamente con variables de entorno.
+    # Nunca escribir un usuario fijo en este archivo: la configuración vive en
+    # GitHub Actions -> Settings -> Secrets and variables -> Actions -> Variables.
+    expected = os.environ.get('IG_EXPECTED_USERNAME', '').strip().lstrip('@').lower()
+    if not expected:
+        raise RuntimeError('Falta IG_EXPECTED_USERNAME: define la variable de GitHub para publicar')
+    me = ig_api('GET', 'me', token=token, data={'fields': 'id,username'})
+    actual_id = str(me.get('id', '')).strip()
+    actual_username = str(me.get('username', '')).strip().lstrip('@').lower()
+    if actual_id != user_id:
+        raise RuntimeError('INSTAGRAM_USER_ID no coincide con la cuenta autorizada por INSTAGRAM_TOKEN')
+    if actual_username != expected:
+        raise RuntimeError(
+            f'Cuenta Instagram diferente: esperado=@{expected}, recibido=@{actual_username}'
+        )
+    print(f'Cuenta Instagram verificada: @{actual_username}', flush=True)
     gh = Github()
     gh.assert_public()
     path = 'dataviral/state.json'
