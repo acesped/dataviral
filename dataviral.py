@@ -426,6 +426,43 @@ def _normalize_ai_fields(data):
     return data
 
 
+def classify_openrouter_429(response):
+    """Distingue saturación del proveedor y cuota global sin asumir que todo 429 es global.
+
+    Devuelve 'provider', 'account' o 'unknown'. Nunca imprime credenciales.
+    """
+    try:
+        body = response.json()
+    except (ValueError, TypeError):
+        body = {}
+    error = body.get('error') if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        error = {}
+    meta = error.get('metadata')
+    if not isinstance(meta, dict):
+        meta = {}
+    details = ' '.join(str(x) for x in (
+        error.get('message', ''), meta.get('raw', ''),
+        meta.get('provider_name', ''), meta.get('reason', ''),
+    )).lower()
+    provider_clues = (
+        'temporarily rate-limited upstream', 'rate-limited upstream',
+        'upstream', 'provider returned error', 'provider rate limit',
+        'provider rate-limit', 'provider is rate limited',
+    )
+    if any(phrase in details for phrase in provider_clues):
+        return 'provider'
+    account_clues = (
+        'free-models-per-day', 'free model requests per day',
+        'daily free requests', 'daily limit', 'daily quota',
+        'insufficient credits', 'not enough credits',
+        'account rate limit', 'your account', 'your quota',
+    )
+    if any(phrase in details for phrase in account_clues):
+        return 'account'
+    return 'unknown'
+
+
 def create_ai_episode(ep):
     """Texto JSON compacto con modelos gratuitos: rígido y luego flexible.
 
@@ -489,7 +526,20 @@ def create_ai_episode(ep):
                 if response.status_code in (401, 403):
                     raise RuntimeError('Credenciales OpenRouter rechazadas')
                 if response.status_code == 429:
-                    raise RuntimeError('Cuota gratuita agotada o límite de OpenRouter alcanzado')
+                    category = classify_openrouter_429(response)
+                    if category == 'provider':
+                        print(f'OpenRouter {model}: proveedor gratuito saturado; '
+                              'se probará el siguiente modelo gratuito.', flush=True)
+                        # Un cambio de parámetros no resuelve el límite upstream.
+                        break
+                    if category == 'account':
+                        raise RuntimeError('Límite de la cuenta o cuota gratuita '
+                                           'de OpenRouter agotada; se conserva el episodio pendiente.')
+                    # Si se desconoce el origen, no afirmar que la cuota de la cuenta
+                    # está agotada. Continuar con otro modelo gratuito como máximo.
+                    print(f'OpenRouter {model}: HTTP 429 de origen desconocido; '
+                          'se probará otro modelo gratuito.', flush=True)
+                    break
                 # 404 por require_parameters => probar modo prompt del MISMO modelo.
                 if response.status_code in (400, 404, 422) and mode == 'structured':
                     continue
