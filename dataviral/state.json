@@ -2,8 +2,10 @@
   "schema": 1,
   "episodes": {
     "DV-001": {
-      "reel": "enviando",
-      "updated_at": "2026-10-17T02:37:02.727744+00:00"
+      "reel": "publicado",
+      "updated_at": "2026-10-17T02:37:49.427988+00:00",
+      "share_to_feed": true,
+      "reel_id": "18108436949360425"
     }
   }
 }
