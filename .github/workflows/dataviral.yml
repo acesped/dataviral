@@ -1,4 +1,4 @@
-name: DataViral - Gemini guiones y videos Instagram
+name: DataViral - OpenRouter Free guiones y videos Instagram
 
 on:
   workflow_dispatch:
@@ -37,12 +37,12 @@ jobs:
     timeout-minutes: 35
     env:
       PYTHONUNBUFFERED: '1'
-      GEMINI_MODEL: 'gemini-2.5-flash'
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENROUTER_MODEL: 'openrouter/free'
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
       INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
       IG_GRAPH_VERSION: 'v25.0'
-      IG_EXPECTED_USERNAME: 'groundshake_cl'
+      IG_EXPECTED_USERNAME: 'cazadores_de_terremotos'
       GH_TOKEN: ${{ github.token }}
       GITHUB_REPOSITORY: ${{ github.repository }}
       GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
@@ -76,23 +76,48 @@ jobs:
       - name: Validar configuración
         shell: bash
         env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
+          INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
           PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
           AUTO: ${{ inputs.auto_publish && 'true' || 'false' }}
           EPISODE: ${{ inputs.episode_id }}
           APPROVED: ${{ inputs.approved_id }}
         run: |
           set -euo pipefail
-          [[ -n "${GEMINI_API_KEY:-}" ]] || { echo '::error::Falta GEMINI_API_KEY'; exit 1; }
+          if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+            echo '::error::No se recibio OPENROUTER_API_KEY. Configuralo en Settings > Secrets and variables > Actions > Secrets.'
+            exit 1
+          fi
+          echo 'Credencial OpenRouter presente (valor oculto).'
           if [[ "$PUBLISH" == true ]]; then
             [[ -n "${INSTAGRAM_TOKEN:-}" && -n "${INSTAGRAM_USER_ID:-}" ]] || { echo '::error::Faltan secretos de Instagram'; exit 1; }
             [[ "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]] || { echo '::error::INSTAGRAM_USER_ID no es numerico'; exit 1; }
+            [[ "${IG_EXPECTED_USERNAME:-}" == 'cazadores_de_terremotos' ]] || { echo '::error::Usuario Instagram inesperado'; exit 1; }
             if [[ "$AUTO" != true ]]; then
               [[ -n "$EPISODE" && "$EPISODE" == "$APPROVED" ]] || { echo '::error::Confirmar ID de episodio, o activar auto_publish'; exit 1; }
             fi
           fi
-      - name: Crear guion con IA, video y opcionalmente publicar
+      - name: Confirmar modelo gratuito OpenRouter
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import dataviral
+          assert dataviral.OPENROUTER_MODEL == 'openrouter/free', dataviral.OPENROUTER_MODEL
+          print('Modelo OpenRouter:', dataviral.OPENROUTER_MODEL)
+          PY
+      - name: Generar guion con OpenRouter, video y opcionalmente publicar
         shell: bash
         env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: 'openrouter/free'
+          INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
+          INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          IG_EXPECTED_USERNAME: 'cazadores_de_terremotos'
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
           PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
           AUTO: ${{ inputs.auto_publish && 'true' || 'false' }}
           EPISODE: ${{ inputs.episode_id }}
