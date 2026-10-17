@@ -591,96 +591,181 @@ def _free_prompt(ep, mode):
     return instruction + ' ' + content
 
 
-def create_ai_episode(ep):
-    """Genera texto con modelos gratuitos, salida mínima y formatos alternativos.
-
-    Un proveedor saturado no agota necesariamente la cuota de la cuenta.
-    Rechaza guiones incompletos y nunca cambia a modelos de pago.
-    """
-    key = credential('OPENROUTER_API_KEY', TEST_OPENROUTER_API_KEY)
-    candidates = select_free_json_models(key, 7)
-    print('Modelos gratuitos de texto: ' + ', '.join(mid for mid, _ in candidates), flush=True)
+def _openrouter_text(key, model, prompt, *, max_tokens=1100):
+    """Una solicitud corta; devuelve texto o falla sin ocultar el diagnóstico."""
     headers = {
-        'Authorization': 'Bearer ' + key,
+        'Authorization': f'Bearer {key}',
         'Content-Type': 'application/json',
         'HTTP-Referer': 'https://github.com',
         'X-Title': 'Dato Wow - DataViral',
     }
+    payload = {
+        'model': model,
+        'messages': [
+            {'role': 'system', 'content': 'Responde en español. Solo el formato pedido. Sin comentarios adicionales.'},
+            {'role': 'user', 'content': prompt},
+        ],
+        'temperature': 0.2,
+        'max_tokens': max_tokens,
+        'stream': False,
+    }
+    # No forzar JSON schema ni parámetros no compatibles con proveedores gratuitos.
+    response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=130)
+    if response.status_code == 429:
+        kind = classify_openrouter_429(response)
+        if kind == 'account':
+            raise RuntimeError('Cuota gratuita de la cuenta OpenRouter agotada')
+        raise ValueError(f'HTTP 429 ({kind}): modelo temporalmente saturado')
+    if response.status_code in (401, 403):
+        raise RuntimeError('OpenRouter rechazó la credencial o el acceso a la API')
+    if not response.ok:
+        raise ValueError(f'HTTP {response.status_code}: {response.text[:150]}')
+    body = response.json()
+    choice = (body.get('choices') or [{}])[0]
+    finish = choice.get('finish_reason')
+    message = choice.get('message') or {}
+    content = message.get('content') or ''
+    if isinstance(content, list):
+        content = ''.join(part.get('text', '') for part in content if isinstance(part, dict))
+    if finish == 'length':
+        raise ValueError('respuesta truncada por límite de tokens')
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError('modelo sin texto visible')
+    return content.strip()
+
+
+def _parse_narration(raw):
+    """Acepta un objeto JSON corto o líneas TITLE/SCRIPT/FACT/LESSON."""
+    try:
+        obj = _parse_ai_json(raw)
+    except (ValueError, json.JSONDecodeError):
+        obj = {}
+        for line in raw.strip().strip('`').splitlines():
+            hit = re.match(r'^\s*(TITULO|TITLE|GUION|SCRIPT|DATO|FACT|LECCION|LESSON)\s*:\s*(.+?)\s*$', line, re.I)
+            if hit:
+                key = {'TITULO':'title','TITLE':'title','GUION':'script','SCRIPT':'script',
+                       'DATO':'fact','FACT':'fact','LECCION':'lesson','LESSON':'lesson'}[hit.group(1).upper()]
+                obj[key] = hit.group(2).strip()
+    if not isinstance(obj, dict):
+        raise ValueError('narración no estructurada')
+    for field in ('title','script'):
+        if not isinstance(obj.get(field), str) or not obj[field].strip():
+            raise ValueError(f'falta {field}')
+    obj['fact'] = str(obj.get('fact') or obj.get('lesson') or obj['title']).strip()
+    obj['lesson'] = str(obj.get('lesson') or obj.get('fact') or obj['title']).strip()
+    words = len(obj['script'].split())
+    if not 38 <= words <= 54:
+        raise ValueError(f'guion de {words} palabras, se requieren 38-54')
+    return obj
+
+
+def _parse_five_visuals(raw):
+    """Extrae cinco mensajes de un array JSON o cinco líneas numeradas."""
+    try:
+        obj = json.loads(raw.strip())
+        if isinstance(obj, list):
+            visuals = obj
+        elif isinstance(obj, dict):
+            visuals = obj.get('visuals') or obj.get('mensajes')
+        else:
+            visuals = None
+        if isinstance(visuals, list):
+            return visuals
+    except json.JSONDecodeError:
+        pass
+    found = {}
+    for line in raw.splitlines():
+        hit = re.match(r'^\s*(?:MENSAJE[_ ]?|ESCENA[_ ]?|[\-]?)\s*([1-5])\s*[.):\-]\s*(.+?)\s*$', line, re.I)
+        if hit:
+            found[int(hit.group(1))] = hit.group(2).strip().strip('"')
+    if len(found) != 5:
+        raise ValueError('faltan cinco mensajes visuales')
+    return [found[i] for i in range(1,6)]
+
+
+def create_ai_episode(ep):
+    """Dos etapas cortas: narración, después cinco mensajes visuales.
+
+    Evita pedir un gran JSON. Solo usa modelos con prompt/completion gratuitos;
+    si alguno falla por saturación o salida truncada prueba el siguiente.
+    """
+    key = credential('OPENROUTER_API_KEY', TEST_OPENROUTER_API_KEY)
+    candidates = select_free_json_models(key, 7)
+    print('Modelos gratuitos disponibles: ' + ', '.join(mid for mid, _ in candidates), flush=True)
+    intro = (
+        f"Tema: {str(ep.get('title', ''))[:140]}. "
+        f"Categoría: {str(ep.get('category', ''))[:70]}. "
+        f"Enseñanza deseada: {str(ep.get('lesson', ''))[:160]}."
+    )
+    narration_prompt = (
+        'Redacta un guion educativo sorprendente pero preciso, con ENTRE 38 Y 54 PALABRAS '
+        'en español para narrar en 20 segundos. Sin cifras inventadas, sin introducciones vacías, '
+        'sin consejos médicos o de emergencia no verificados. Responde SOLO cuatro líneas, '
+        'sin Markdown: TITULO: ...\nGUION: ...\nDATO: ...\nLECCION: ...\n' + intro
+    )
+    narration = None
+    narration_model = None
     last_problem = 'sin respuesta'
-    data = None
-    used_model = None
-    for index, (model, supports_format) in enumerate(candidates):
-        # No se exige response_format a los proveedores; la validación es local.
-        # Alternamos respuesta JSON y líneas sin consumir dos llamadas por modelo.
-        mode = 'json' if index % 2 == 0 else 'lines'
-        payload = {
-            'model': model,
-            'messages': [
-                {'role': 'system', 'content': 'Escribe contenido educativo breve, fiel al formato solicitado.'},
-                {'role': 'user', 'content': _free_prompt(ep, mode)},
-            ],
-            'temperature': 0.2,
-            'max_tokens': 1900,
-            'stream': False,
-        }
+    for model, _ in candidates:
         try:
-            response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=130)
-        except requests.RequestException as exc:
-            last_problem = 'fallo de red: ' + type(exc).__name__
-            print(f'OpenRouter {model}: {last_problem}', flush=True)
-            continue
-        if not response.ok:
-            last_problem = f'HTTP {response.status_code}: {response.text[:180]}'
-            print(f'OpenRouter {model}: {last_problem}', flush=True)
-            if response.status_code in (401, 403):
-                raise RuntimeError('Credenciales OpenRouter rechazadas')
-            if response.status_code == 429:
-                category = classify_openrouter_429(response)
-                if category == 'account':
-                    raise RuntimeError('Cuota gratuita de la cuenta agotada; episodio pendiente')
-                print(f'Proveedor gratuito con HTTP 429 ({category}); siguiente modelo.', flush=True)
-            continue
-        try:
-            body = response.json()
-            choice = (body.get('choices') or [])[0]
-            message = choice.get('message') or {}
-            content = message.get('content') or ''
-            if isinstance(content, list):
-                content = ''.join(piece.get('text', '') for piece in content if isinstance(piece, dict))
-            finish = choice.get('finish_reason')
-            if finish == 'length':
-                raise ValueError('respuesta truncada por límite de tokens')
-            data = _normalize_ai_fields(_parse_compact_response(content))
-            used_model = body.get('model') or model
-            print(f'Guion válido con {model} [{mode}]', flush=True)
+            raw = _openrouter_text(key, model, narration_prompt, max_tokens=1200)
+            narration = _parse_narration(raw)
+            narration_model = model
+            print(f'Narración validada con {model}', flush=True)
             break
-        except (ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError) as exc:
-            data = None
-            last_problem = f'guion no válido ({mode}): {str(exc)[:155]}'
-            print(f'OpenRouter {model}: {last_problem}', flush=True)
-    if data is None:
-        raise RuntimeError('Ningún modelo gratuito produjo guion válido. '
+        except RuntimeError:
+            raise
+        except (ValueError, requests.RequestException, KeyError, TypeError) as exc:
+            last_problem = f'{model}: {str(exc)[:140]}'
+            print(f'OpenRouter etapa 1: {last_problem}', flush=True)
+    if narration is None:
+        raise RuntimeError('Ningún modelo gratuito generó narración válida. '
                            f'Último diagnóstico: {last_problem}. No se publicó nada.')
-    sources = []
-    for item in data.get('sources', [])[:3]:
-        if isinstance(item, str) and item.startswith('https://'):
-            host = urllib.parse.urlparse(item).hostname or ''
-            if host and host not in ('example.com', 'www.example.com'):
-                sources.append(item)
+
+    # No volver a generar el guion cuando fallan los mensajes visuales.
+    visuals_prompt = (
+        'Basándote ÚNICAMENTE en el guion siguiente, escribe cinco frases educativas '
+        'completas para cinco escenas consecutivas. Cada una entre 3 y 9 palabras, '
+        'máximo 52 caracteres, sin títulos vacíos, sin puntos suspensivos, sin introducir '
+        'hechos ajenos al guion. Deben explicar cinco aspectos o consecuencias distintas. '
+        'Responde SOLO estas cinco líneas, sin Markdown ni explicaciones: '
+        'MENSAJE_1: ...\nMENSAJE_2: ...\nMENSAJE_3: ...\nMENSAJE_4: ...\nMENSAJE_5: ...\n'
+        f"TITULO: {narration['title']}\nGUION: {narration['script']}\n"
+        f"DATO: {narration['fact']}\nLECCION: {narration['lesson']}"
+    )
+    visuals = None
+    visual_model = None
+    # Antes de otra solicitud, no hay parámetro costoso de razonamiento forzado:
+    # muchos proveedores gratuitos no lo admiten; los prompts cortos reducen consumo.
+    for model, _ in candidates:
+        try:
+            raw = _openrouter_text(key, model, visuals_prompt, max_tokens=1050)
+            proposed = _parse_five_visuals(raw)
+            visuals = validar_microfrases(proposed, narration['script'],
+                                           narration['title'], narration['fact'], narration['lesson'])
+            visual_model = model
+            print(f'Cinco mensajes validados con {model}', flush=True)
+            break
+        except RuntimeError:
+            raise
+        except (ValueError, requests.RequestException, KeyError, TypeError) as exc:
+            last_problem = f'{model}: {str(exc)[:140]}'
+            print(f'OpenRouter etapa 2: {last_problem}', flush=True)
+    if visuals is None:
+        raise RuntimeError('Narración válida, pero ningún modelo gratuito generó cinco mensajes '
+                           f'legibles. Último diagnóstico: {last_problem}. No se publicó nada.')
+
     result = dict(ep)
     result.update(
-        title=data['title'].strip(), script=data['script'].strip(),
-        lesson=data['lesson'].strip(), fact=data['fact'].strip(),
-        visual_title=data['visuals'][0], visual_lesson=data['visuals'][4],
-        visuals=data['visuals'], source=' | '.join(sources),
-        suggested_sources=sources, ai_model=used_model,
-        generated_at=now(), verified=False,
-        verification_note='Contenido no verificado independientemente',
+        title=narration['title'], script=narration['script'],
+        fact=narration['fact'], lesson=narration['lesson'],
+        visuals=visuals, visual_title=visuals[0], visual_lesson=visuals[-1],
+        source='', suggested_sources=[], ai_model=narration_model,
+        visual_ai_model=visual_model, generated_at=now(), verified=False,
+        verification_note='Contenido generado con IA, no verificado independientemente',
     )
-    print(f"Guion OpenRouter creado: {ep['id']}; fuentes propuestas: " +
-          (' | '.join(sources) if sources else 'ninguna'), flush=True)
+    print(f"Guion OpenRouter creado: {ep['id']}; textos cortos: 5; fuentes propuestas: ninguna", flush=True)
     return result
-
 
 def select_episode(episodes, gh=None, requested=None):
     """Selecciona un episodio pendiente con variedad de categorias y azar real.
@@ -1112,4 +1197,3 @@ def main():
 
 if __name__=='__main__':
     sys.exit(main())
- 
