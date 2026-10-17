@@ -252,6 +252,30 @@ def _parse_ai_json(text):
         return json.loads(text[start:end+1])
 
 
+def ajustar_texto_visual(texto, max_caracteres=85):
+    """Abrevia una etiqueta visual en el límite de palabra, sin cambiar el original.
+
+    Para no publicar una afirmación recortada, intenta usar una oración entera;
+    las escenas son solo apoyo visual y nunca sustituyen el guion narrado.
+    """
+    texto = re.sub(r'\s+', ' ', str(texto or '')).strip()
+    if len(texto) <= max_caracteres:
+        return texto
+    # Una oración completa evita frases visuales suspendidas.
+    oraciones = re.split(r'(?<=[.!?])\s+', texto)
+    for oracion in oraciones:
+        if 12 <= len(oracion) <= max_caracteres:
+            return oracion
+    # Si no cabe ninguna oración, abreviar sin dividir palabras.
+    palabras = []
+    for palabra in texto.split():
+        candidato = ' '.join(palabras + [palabra])
+        if len(candidato) > max_caracteres - 1:
+            break
+        palabras.append(palabra)
+    return ' '.join(palabras).rstrip(' ,;:.!?') + '…' if palabras else texto[:max_caracteres-1] + '…'
+
+
 def create_ai_episode(ep):
     """Redacta un guion con modelos gratuitos de OpenRouter.
 
@@ -264,9 +288,9 @@ def create_ai_episode(ep):
         'Escribe en español, impactante pero sin exageraciones. '
         'Devuelve UNICAMENTE un objeto JSON válido con claves: '
         'title, script, lesson, category, fact, sources. '
-        'title: máximo 105 caracteres. '
+        'title: máximo 65 caracteres y una idea completa. '
         'script: entre 38 y 54 palabras, apropiado para narración de ~20 segundos; '
-        'sin hashtags ni URLs. lesson: máximo 260 caracteres. '
+        'sin hashtags ni URLs. lesson: máximo 140 caracteres, una idea clara. '
         'fact: una afirmación central comprobable. '
         'sources: array de 1 a 3 URL https de organismos o estudios reputados, '
         'SOLO si conoces con certeza la dirección exacta; nunca inventes links. '
@@ -350,8 +374,12 @@ def create_ai_episode(ep):
     words = len(data['script'].split())
     if not 38 <= words <= 54:
         raise RuntimeError(f'Duración incompatible: {words} palabras (38-54 requeridas)')
-    if len(data['title']) > 105 or len(data['lesson']) > 260:
-        raise RuntimeError('Texto visual demasiado largo')
+    # La longitud del texto visual no debe invalidar un guion válido.
+    # Mantener el contenido original para la descripción y narración.
+    visual_title = ajustar_texto_visual(data['title'], 85)
+    visual_lesson = ajustar_texto_visual(data['lesson'], 85)
+    if len(data['title']) > 85 or len(data['lesson']) > 85:
+        print('Aviso: textos visuales abreviados para la composición; guion intacto.', flush=True)
     suggested = data.get('sources', [])
     if not isinstance(suggested, list):
         suggested = []
@@ -365,7 +393,8 @@ def create_ai_episode(ep):
     result = dict(ep)
     result.update(
         title=data['title'].strip(), script=data['script'].strip(),
-        lesson=data['lesson'].strip(), fact=data['fact'].strip(),
+        lesson=data['lesson'].strip(), visual_title=visual_title,
+        visual_lesson=visual_lesson, fact=data['fact'].strip(),
         source=' | '.join(sources), suggested_sources=sources,
         ai_model=body.get('model', OPENROUTER_MODEL),
         generated_at=now(), verified=False,
@@ -438,7 +467,7 @@ def scene(ep, number, dest):
     d.rounded_rectangle((52, 72, 668, 152), 24, fill=(255, 255, 255, 18), outline=(*accent, 200), width=3)
     d.text((77, 91), 'D A T A V I R A L', font=font(33, True), fill=(255, 255, 255))
     d.text((55, 187), f"{ep['id']}   /   {ep['category'].upper()}", font=font(19, True), fill=accent)
-    title = ep['title'].rstrip(' .?!')
+    title = ep.get('visual_title', ajustar_texto_visual(ep['title'], 85)).rstrip(' .?!')
     stages = [title, 'LA CLAVE', 'QUÉ SIGNIFICA', 'ÚSALO A TU FAVOR', 'RECUÉRDALO']
     lines = wrap_text(d, stages[number], font(56, True), 600)
     start_y = 325
@@ -446,7 +475,7 @@ def scene(ep, number, dest):
         d.text((56, start_y), line, font=font(56, True), fill='white', stroke_width=1)
         start_y += 79
     script_sentences = re.split(r'(?<=[.!?])\s+', ep['script'].strip())
-    excerpts = [ep['script'].split('.')[0] + '.', *script_sentences[:3], ep['lesson']]
+    excerpts = [ep['script'].split('.')[0] + '.', *script_sentences[:3], ep.get('visual_lesson', ajustar_texto_visual(ep['lesson'], 85))]
     excerpt = excerpts[min(number, len(excerpts)-1)][:230]
     sublines = wrap_text(d, excerpt, font(31), 586)
     for index, line in enumerate(sublines[:7]):
