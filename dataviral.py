@@ -683,6 +683,45 @@ def _parse_five_visuals(raw):
     return [found[i] for i in range(1,6)]
 
 
+def _mensajes_locales_desde_guion(narration):
+    """Respaldo extractivo: frases del guion, nunca hechos inventados.
+
+    Utiliza solamente oraciones o proposiciones completas tal como aparecen
+    en la narración. Si el guion no contiene cinco ideas autosuficientes y
+    legibles, falla de forma segura en lugar de fabricar afirmaciones.
+    """
+    script = narration['script']
+    # Separar únicamente por puntuación fuerte y conectores que mantienen
+    # una proposición independiente. Evitamos cortar por número de palabras.
+    sentences = re.split(r'(?<=[.!?;])\s+|(?<=;)\s*', script)
+    candidates = []
+    for sentence in sentences:
+        sentence = sentence.strip(' \t\n.,;:¡!¿?')
+        if not sentence:
+            continue
+        parts = re.split(r'\s*[;:]\s*|,\s+(?=(?:pero|aunque|sin embargo|por eso|además)\b)', sentence, flags=re.I)
+        for part in parts:
+            part = part.strip(' \t\n.,;:¡!¿?')
+            # Eliminar conectores iniciales solo cuando queda una oración
+            # con verbo; no reconstruir ni parafrasear el contenido.
+            part = re.sub(r'^(?:pero|aunque|sin embargo|además|por eso),?\s+', '', part, flags=re.I)
+            if part and 3 <= len(part.split()) <= VISUAL_MAX_WORDS and len(part) <= VISUAL_MAX_CHARS:
+                candidates.append(part)
+    valid = []
+    for candidate in candidates:
+        try:
+            validar_microfrases([candidate] * 5, script, narration['title'], narration['fact'], narration['lesson'])
+        except ValueError as exc:
+            if 'texto repetido' not in str(exc):
+                continue
+        valid.append(candidate)
+    # No replicar mensajes para completar cinco escenas.
+    unique = list(dict.fromkeys(valid))
+    if len(unique) < 5:
+        raise ValueError(f'el guion solo contiene {len(unique)} frases breves extraíbles (requiere 5)')
+    return validar_microfrases(unique[:5], script, narration['title'], narration['fact'], narration['lesson'])
+
+
 def create_ai_episode(ep):
     """Dos etapas cortas: narración, después cinco mensajes visuales.
 
@@ -699,7 +738,10 @@ def create_ai_episode(ep):
     )
     narration_prompt = (
         'Redacta un guion educativo sorprendente pero preciso, con ENTRE 38 Y 54 PALABRAS '
-        'en español para narrar en 20 segundos. Sin cifras inventadas, sin introducciones vacías, '
+        'en español para narrar en 20 segundos. Forma CINCO oraciones completas ' 
+        'de entre 7 y 10 palabras cada una, preferiblemente hasta 52 caracteres ' 
+        'por oración; deben avanzar de causa a conclusión y ser comprensibles ' 
+        'por sí solas. Sin cifras inventadas, sin introducciones vacías, '
         'sin consejos médicos o de emergencia no verificados. Responde SOLO cuatro líneas, '
         'sin Markdown: TITULO: ...\nGUION: ...\nDATO: ...\nLECCION: ...\n' + intro
     )
@@ -737,7 +779,9 @@ def create_ai_episode(ep):
     visual_model = None
     # Antes de otra solicitud, no hay parámetro costoso de razonamiento forzado:
     # muchos proveedores gratuitos no lo admiten; los prompts cortos reducen consumo.
-    for model, _ in candidates:
+    # El modelo que completó bien la narración recibe la primera oportunidad.
+    visual_candidates = sorted(candidates, key=lambda row: row[0] != narration_model)
+    for model, _ in visual_candidates:
         try:
             raw = _openrouter_text(key, model, visuals_prompt, max_tokens=1050)
             proposed = _parse_five_visuals(raw)
@@ -752,8 +796,18 @@ def create_ai_episode(ep):
             last_problem = f'{model}: {str(exc)[:140]}'
             print(f'OpenRouter etapa 2: {last_problem}', flush=True)
     if visuals is None:
-        raise RuntimeError('Narración válida, pero ningún modelo gratuito generó cinco mensajes '
-                           f'legibles. Último diagnóstico: {last_problem}. No se publicó nada.')
+        # Evitar fallar por una segunda llamada cuando el propio guion
+        # contiene cinco proposiciones breves. Nunca inventar información.
+        try:
+            visuals = _mensajes_locales_desde_guion(narration)
+            visual_model = 'extractivo-local'
+            print('Cinco mensajes recuperados literalmente del guion (sin IA adicional)', flush=True)
+        except ValueError as exc:
+            raise RuntimeError(
+                'Narración válida, pero no se obtuvieron cinco mensajes seguros. '
+                f'OpenRouter: {last_problem}. Respaldo local: {exc}. '
+                'No se publicó nada.'
+            ) from exc
 
     result = dict(ep)
     result.update(
