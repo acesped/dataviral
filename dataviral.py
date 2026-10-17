@@ -212,17 +212,17 @@ uEensT?emG$FN^TgHmQpMoi>kT$>+WN`sLrh#utpt?g@SaX&18u;)*3(34*+Q0GyRly@Es9<Mm!cS5`a
 rz0Kg9GvmPSOc(kPVGQJ5h8&orPUPyGb$~7gQRS&>qmlm>Q|F^@%xZU)S{2z(8G(6yhG(!zZ-ppLs4KS~JUc$$R9#6(Qg?7?v6v0~fB!%6wD2t"""
 # VALORES HARDCODE PARA PRUEBAS LOCALES (ficticios, nunca credenciales reales).
 # Los secretos de GitHub prevalecen sobre estos valores.
-TEST_GEMINI_API_KEY = "PON_AQUI_TU_CLAVE_DE_PRUEBA"
+# Para pruebas locales se puede sustituir el valor de demostración.
+# No introduzcas credenciales reales en un repositorio público.
+TEST_OPENROUTER_API_KEY = "PON_AQUI_TU_CLAVE_DE_PRUEBA"
 TEST_INSTAGRAM_TOKEN = "PON_AQUI_TU_TOKEN_DE_PRUEBA"
 TEST_INSTAGRAM_USER_ID = "00000000000000000"
-# El workflow antiguo exportaba gemini-2.5-flash: se sustituye automáticamente
-# por el modelo vigente, incluso cuando no se ha actualizado el YAML.
-GEMINI_MODEL_REQUESTED = os.getenv('GEMINI_MODEL', 'gemini-3.8-flash').strip()
-GEMINI_MODEL = ('gemini-3.8-flash' if GEMINI_MODEL_REQUESTED in
-                ('', 'gemini-2.5-flash', 'models/gemini-2.5-flash')
-                else GEMINI_MODEL_REQUESTED.removeprefix('models/'))
-if GEMINI_MODEL != GEMINI_MODEL_REQUESTED:
-    print(f'Modelo heredado {GEMINI_MODEL_REQUESTED!r} sustituido por {GEMINI_MODEL}', flush=True)
+
+# Únicamente se acepta el router gratuito o un modelo con sufijo :free.
+OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'openrouter/free').strip() or 'openrouter/free'
+if OPENROUTER_MODEL != 'openrouter/free' and not OPENROUTER_MODEL.endswith(':free'):
+    raise RuntimeError('Modelo no gratuito rechazado: configura openrouter/free o un modelo :free')
+OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
 
 GRAPH_VERSION = os.getenv('IG_GRAPH_VERSION', 'v25.0')
 
@@ -239,77 +239,114 @@ def catalog():
     return json.loads(zlib.decompress(base64.b85decode(''.join(CATALOG_B85.split()))))
 
 
-def create_ai_episode(ep):
-    """Genera guion con Gemini y Google Search grounding, falla cerrado sin evidencias.
+def _parse_ai_json(text):
+    """Extrae un objeto JSON incluso si el modelo lo devuelve con fences."""
+    text = text.strip()
+    text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text, flags=re.I).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find('{'), text.rfind('}')
+        if start < 0 or end < start:
+            raise RuntimeError('OpenRouter no devolvió un objeto JSON')
+        return json.loads(text[start:end+1])
 
-    La presencia de URLs es un control básico, NO una verificación independiente
-    de cada afirmación; revisar guiones antes de publicación es recomendable.
+
+def create_ai_episode(ep):
+    """Redacta un guion con modelos gratuitos de OpenRouter.
+
+    No hay grounding verificable: las referencias propuestas por el modelo
+    son solo candidatas y NO prueban los hechos. Se guarda verified=False.
     """
-    key = credential('GEMINI_API_KEY', TEST_GEMINI_API_KEY)
-    url = f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
-    prompt = ("Eres editor de microdocumentales rigurosos DataViral. "
-              "Investiga el tema con búsqueda, prioriza organismos científicos, "
-              "universidades y fuentes públicas confiables. NO inventes referencias. "
-              "Devuelve SOLO un JSON válido con claves title, script, lesson, "
-              "category y fact. El script debe tener 38-54 palabras en español, "
-              "sin hashtags ni URLs. fact debe ser una frase comprobable. "
-              "Evita recomendaciones médicas o de emergencia no contextualizadas; "
-              "evita sensacionalismo y promesas absolutas. "
-              f"Tema editorial: {ep.get('title')}. "
-              f"Categoría: {ep.get('category')}. "
-              f"Aprendizaje: {ep.get('lesson')}. "
-              "No repitas fórmulas ni inventes cifras.")
-    payload = {'contents':[{'parts':[{'text':prompt}]}],
-               'tools':[{'google_search':{}}],
-               'generationConfig':{'temperature':0.55,'maxOutputTokens':1500}}
-    response = requests.post(url, headers={'x-goog-api-key':key},json=payload,timeout=100)
+    key = credential('OPENROUTER_API_KEY', TEST_OPENROUTER_API_KEY)
+    prompt = (
+        'Eres editor de microdocumentales rigurosos para la marca Dato Wow. '
+        'Escribe en español, impactante pero sin exageraciones. '
+        'Devuelve UNICAMENTE un objeto JSON válido con claves: '
+        'title, script, lesson, category, fact, sources. '
+        'title: máximo 105 caracteres. '
+        'script: entre 38 y 54 palabras, apropiado para narración de ~20 segundos; '
+        'sin hashtags ni URLs. lesson: máximo 260 caracteres. '
+        'fact: una afirmación central comprobable. '
+        'sources: array de 1 a 3 URL https de organismos o estudios reputados, '
+        'SOLO si conoces con certeza la dirección exacta; nunca inventes links. '
+        'Si no conoces una referencia fiable exacta, devuelve sources=[]: '
+        'el episodio quedará bloqueado para publicación. '
+        'Evita consejos médicos o de emergencia no contextualizados y '
+        'afirmaciones pseudocientíficas. '
+        f"Tema: {ep.get('title')}. "
+        f"Categoria: {ep.get('category')}. "
+        f"Aprendizaje deseado: {ep.get('lesson')}."
+    )
+    payload = {
+        'model': OPENROUTER_MODEL,
+        'messages': [
+            {'role': 'system', 'content': 'Responde solamente JSON. No inventes hechos ni referencias.'},
+            {'role': 'user', 'content': prompt},
+        ],
+        'temperature': 0.45,
+        'max_tokens': 1100,
+        'stream': False,
+    }
+    response = requests.post(
+        OPENROUTER_URL,
+        headers={
+            'Authorization': f'Bearer {key}',
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://github.com',
+            'X-Title': 'Dato Wow - DataViral',
+        },
+        json=payload,
+        timeout=110,
+    )
     if not response.ok:
-        if response.status_code == 404:
-            raise RuntimeError(
-                f'Gemini HTTP 404: el modelo {GEMINI_MODEL!r} no está disponible '
-                'para esta cuenta. Verifica los modelos habilitados en Google AI '
-                'Studio y configura GEMINI_MODEL. Detalle: '
-                f'{response.text[:350]}')
-        if response.status_code in (401, 403):
-            raise RuntimeError(
-                f'Gemini HTTP {response.status_code}: verifica la API key y '
-                'permisos del proyecto. Detalle: '
-                f'{response.text[:350]}')
+        detail = response.text[:500]
         if response.status_code == 429:
-            raise RuntimeError(
-                'Gemini HTTP 429: cuota excedida o límite de solicitudes. '
-                'No se reintentará con modelos de pago automáticamente. '
-                f'Detalle: {response.text[:350]}')
-        raise RuntimeError(f'Gemini HTTP {response.status_code}: {response.text[:500]}')
-    obj=response.json()
-    if not obj.get('candidates'):
-        raise RuntimeError('Gemini no devolvió candidatos utilizables')
-    candidate=obj['candidates'][0]
-    parts=candidate.get('content',{}).get('parts',[])
-    raw=''.join(part.get('text','') for part in parts)
-    raw=re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(),flags=re.I)
-    data=json.loads(raw)
-    sources=[]
-    for chunk in candidate.get('groundingMetadata',{}).get('groundingChunks',[]):
-        web=chunk.get('web') or {}
-        uri=web.get('uri','')
-        if uri.startswith('https://') and uri not in sources:
-            sources.append(uri)
-    if not sources:
-        raise RuntimeError('Sin fuentes comprobables desde Google Search; NO publicar')
-    for field in ('title','script','lesson','fact'):
-        if not isinstance(data.get(field),str) or not data[field].strip():
+            raise RuntimeError('OpenRouter Free HTTP 429: cuota o límite temporal agotado. '
+                               'No se usarán modelos de pago. ' + detail)
+        if response.status_code in (401, 403):
+            raise RuntimeError('OpenRouter Free: revisa OPENROUTER_API_KEY y permisos. ' + detail)
+        raise RuntimeError(f'OpenRouter Free HTTP {response.status_code}: {detail}')
+    body = response.json()
+    choices = body.get('choices') or []
+    if not choices:
+        raise RuntimeError('OpenRouter no devolvió respuesta utilizable')
+    message = choices[0].get('message') or {}
+    raw = message.get('content')
+    if isinstance(raw, list):
+        raw = ''.join(x.get('text', '') for x in raw if isinstance(x, dict))
+    if not isinstance(raw, str) or not raw.strip():
+        raise RuntimeError('OpenRouter devolvió respuesta vacía')
+    data = _parse_ai_json(raw)
+    if not isinstance(data, dict):
+        raise RuntimeError('La respuesta de IA no es un objeto JSON')
+    for field in ('title', 'script', 'lesson', 'fact'):
+        if not isinstance(data.get(field), str) or not data[field].strip():
             raise RuntimeError(f'Guion de IA sin campo requerido: {field}')
-    words=len(data['script'].split())
-    if not (38 <= words <= 54):
-        raise RuntimeError(f'Duración incompatible: {words} palabras (38–54 requeridas)')
-    if len(data['title']) > 105 or len(data['lesson'])>260:
+    words = len(data['script'].split())
+    if not 38 <= words <= 54:
+        raise RuntimeError(f'Duración incompatible: {words} palabras (38-54 requeridas)')
+    if len(data['title']) > 105 or len(data['lesson']) > 260:
         raise RuntimeError('Texto visual demasiado largo')
-    result=dict(ep)
-    result.update(title=data['title'].strip(),script=data['script'].strip(),
-                  lesson=data['lesson'].strip(),source=' | '.join(sources[:3]),
-                  fact=data['fact'].strip(),ai_model=GEMINI_MODEL,
-                  generated_at=now(),verified=False)
+    suggested = data.get('sources', [])
+    if not isinstance(suggested, list):
+        suggested = []
+    # Son referencias sugeridas, NO grounding. Nunca afirmar verificación.
+    sources = []
+    for item in suggested[:3]:
+        if isinstance(item, str) and item.startswith('https://'):
+            host = urllib.parse.urlparse(item).hostname or ''
+            if host and host not in ('example.com', 'www.example.com'):
+                sources.append(item)
+    result = dict(ep)
+    result.update(
+        title=data['title'].strip(), script=data['script'].strip(),
+        lesson=data['lesson'].strip(), fact=data['fact'].strip(),
+        source=' | '.join(sources), suggested_sources=sources,
+        ai_model=body.get('model', OPENROUTER_MODEL),
+        generated_at=now(), verified=False,
+        verification_note='Fuentes sugeridas por IA, no comprobadas de manera independiente',
+    )
     return result
 
 
@@ -549,7 +586,7 @@ def publish(ep, movie, cover, approval):
     if approval != ep['id']:
         raise ValueError('Se exige aprobación explícita del mismo ID de episodio')
     if not ep['source'] or not ep['script']:
-        raise ValueError('Publicación bloqueada: el episodio carece de guion o fuente')
+        raise ValueError('Publicación bloqueada: faltan guion o enlaces de referencia propuestos')
     token = credential('INSTAGRAM_TOKEN', TEST_INSTAGRAM_TOKEN)
     user_id = credential('INSTAGRAM_USER_ID', TEST_INSTAGRAM_USER_ID)
     if not user_id.isdigit():
@@ -609,7 +646,7 @@ def publish(ep, movie, cover, approval):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='DataViral: 500 ideas, IA Gemini y video Instagram')
+    ap = argparse.ArgumentParser(description='DataViral: 500 ideas, IA OpenRouter Free y video Instagram')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--episode', default='', help='ID concreto; vacío = siguiente disponible')
     ap.add_argument('--out', default='output')
@@ -635,11 +672,11 @@ def main():
     out.mkdir(exist_ok=True,parents=True)
     (out/f"{ep['id']}-guion.json").write_text(
         json.dumps(generated,ensure_ascii=False,indent=2),encoding='utf-8')
-    print(f"Guion Gemini creado: {ep['id']}; fuentes: {generated['source']}")
+    print(f"Guion OpenRouter creado: {ep['id']}; referencias propuestas: {generated['source'] or 'ninguna'}")
     movie,cover=render(generated,out,require_voice=args.publish)
     if args.publish:
-        # Las evidencias proceden de grounding automático y NO garantizan revisión
-        # humana. El flag --auto-publish acepta conscientemente ese riesgo.
+        # Los enlaces son sugerencias de IA, NO evidencias verificadas.
+        # El flag --auto-publish acepta conscientemente ese riesgo.
         publish(generated,movie,cover,generated['id'])
     else:
         print('VISTA PREVIA: no se publicó el video')
