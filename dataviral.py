@@ -347,117 +347,150 @@ def texto_centrado_seguro(draw, texto, *, centro_y, ancho=550, max_lineas=2):
     raise ValueError('No es posible componer un titular dentro de la zona segura')
 
 
-def create_ai_episode(ep):
-    """Redacta un guion con modelos gratuitos de OpenRouter.
 
-    No hay grounding verificable: las referencias propuestas por el modelo
-    son solo candidatas y NO prueban los hechos. Se guarda verified=False.
-    """
-    key = credential('OPENROUTER_API_KEY', TEST_OPENROUTER_API_KEY)
-    prompt = (
-        'Eres editor de microdocumentales rigurosos para la marca Dato Wow. '
-        'Escribe en español, impactante pero sin exageraciones. '
-        'Devuelve UNICAMENTE un objeto JSON válido con claves: '
-        'title, script, lesson, category, fact, sources, visuals. '
-        'title: máximo 65 caracteres y una idea completa. '
-        'script: entre 38 y 54 palabras, apropiado para narración de ~20 segundos; '
-        'sin hashtags ni URLs. lesson: máximo 140 caracteres, una idea clara. '
-        'fact: una afirmación central comprobable. '
-        'visuals: lista de EXACTAMENTE cinco frases distintas para la pantalla; '
-        'cada una de 2 a 6 palabras y máximo 38 caracteres, máximo dos líneas; '
-        'frases autónomas, claras, memorables, sin puntos suspensivos ni URLs. '
-        'Nunca copies párrafos de la narración en pantalla. '
-        'sources: array de 1 a 3 URL https de organismos o estudios reputados, '
-        'SOLO si conoces con certeza la dirección exacta; nunca inventes links. '
-        'Si no conoces una referencia fiable exacta, devuelve sources=[]. '
-        'La falta de enlaces no bloquea el episodio. '
-        'Evita consejos médicos o de emergencia no contextualizados y '
-        'afirmaciones pseudocientíficas. '
-        f"Tema: {ep.get('title')}. "
-        f"Categoria: {ep.get('category')}. "
-        f"Aprendizaje deseado: {ep.get('lesson')}."
-    )
-    payload = {
-        'model': OPENROUTER_MODEL,
-        'messages': [
-            {'role': 'system', 'content': 'Responde solamente JSON. No inventes hechos ni referencias.'},
-            {'role': 'user', 'content': prompt},
-        ],
-        'temperature': 0.45,
-        'max_tokens': 3200,
-        'stream': False,
+OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models'
+
+
+def _free_price(value):
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def select_free_json_models(key, count=3):
+    """Consulta el catálogo actual, nunca supone que un nombre aún exista."""
+    configured = OPENROUTER_MODEL
+    headers = {'Authorization': f'Bearer {key}'}
+    response = requests.get(OPENROUTER_MODELS_URL, headers=headers, timeout=30)
+    response.raise_for_status()
+    items = response.json().get('data', [])
+    compatible = []
+    for item in items:
+        model = item.get('id', '')
+        if not isinstance(model, str) or not model.endswith(':free'):
+            continue
+        price = item.get('pricing') or {}
+        if not (_free_price(price.get('prompt')) and _free_price(price.get('completion'))):
+            continue
+        params = item.get('supported_parameters') or []
+        if 'response_format' not in params:
+            continue
+        name = (model + ' ' + str(item.get('name', ''))).lower()
+        if any(word in name for word in ('safety', 'moderation', 'guard', 'omni', 'embedding', 'audio', 'speech', 'image', 'reasoning')):
+            continue
+        context = item.get('context_length') or 0
+        if not isinstance(context, int) or context < 6000:
+            continue
+        compatible.append(model)
+    # Prefer instruction/chat language models, and deterministic selection across runs.
+    def rank(model):
+        label = model.lower()
+        preferred = any(w in label for w in ('instruct', 'chat', 'qwen', 'llama', 'mistral', 'gemma'))
+        return (0 if preferred else 1, label)
+    compatible.sort(key=rank)
+    if configured != 'openrouter/free':
+        if configured not in compatible:
+            raise RuntimeError('El modelo gratuito configurado no figura como compatible con JSON estructurado: ' + configured)
+        return [configured] + [m for m in compatible if m != configured][:count-1]
+    if not compatible:
+        raise RuntimeError('OpenRouter no ofrece actualmente modelos :free con precio cero y response_format. No se publicara.')
+    return compatible[:count]
+
+
+def _episode_json_schema():
+    fields = {
+        'title': {'type': 'string'},
+        'script': {'type': 'string'},
+        'lesson': {'type': 'string'},
+        'category': {'type': 'string'},
+        'fact': {'type': 'string'},
+        'sources': {'type': 'array', 'items': {'type': 'string'}},
+        'visuals': {'type': 'array', 'items': {'type': 'string'}},
     }
+    return {
+        'type': 'json_schema',
+        'json_schema': {
+            'name': 'dato_wow_guion',
+            'strict': True,
+            'schema': {'type': 'object', 'properties': fields,
+                       'required': list(fields), 'additionalProperties': False},
+        },
+    }
+
+def create_ai_episode(ep):
+    """Produce un guion JSON con modelos específicos 100% gratuitos, sin router aleatorio."""
+    key = credential('OPENROUTER_API_KEY', TEST_OPENROUTER_API_KEY)
+    candidates = select_free_json_models(key, 3)
+    print('Modelos gratuitos compatibles elegidos: ' + ', '.join(candidates), flush=True)
+    prompt = (
+        'Eres guionista de Dato Wow. Responde un objeto JSON válido, SIN Markdown ni explicaciones. '
+        'Español claro, hecho plausible, sorprendente, útil y memorable; no inventes estadísticas. '
+        'Claves: title, script, lesson, category, fact, sources, visuals. '
+        'Guion narrado script entre 38 y 54 palabras, un solo párrafo. '
+        'title breve; lesson enseñanza clara; fact afirmación concreta. '
+        'sources lista de URLs HTTPS conocidas o lista vacía: nunca inventes referencias. '
+        'visuals exactamente 5 microfrases distintas, cada una 2-6 palabras, máximo 38 caracteres. '
+        'No incluyas instrucciones peligrosas de salud ni emergencias. '
+        f"Tema: {ep.get('title')}; categoría: {ep.get('category')}; idea: {ep.get('lesson')}."
+    )
     headers = {
         'Authorization': f'Bearer {key}',
         'Content-Type': 'application/json',
         'HTTP-Referer': 'https://github.com',
         'X-Title': 'Dato Wow - DataViral',
     }
-    # Tres intentos máximo; solo modelos gratuitos. No publicar si el JSON
-    # está incompleto, truncado o incumple los campos necesarios.
-    data = None
-    body = {}
-    last_problem = 'respuesta no disponible'
-    for attempt in range(3):
-        payload['max_tokens'] = (3200, 6400, 6400)[attempt]
-        if attempt:
-            payload['messages'][0]['content'] = (
-                'Devuelve UNICAMENTE JSON valido, compacto y completo. '
-                'No uses Markdown, ni introducciones. Evita razonamiento extenso. '
-                'Respeta exactamente los campos y 38-54 palabras en script.'
-            )
+    data, body, last_problem = None, {}, 'sin respuesta'
+    for i, model in enumerate(candidates, 1):
+        payload = {
+            'model': model,
+            'messages': [
+                {'role': 'system', 'content': 'Genera exclusivamente JSON compacto válido; no muestres razonamiento.'},
+                {'role': 'user', 'content': prompt},
+            ],
+            'response_format': _episode_json_schema(),
+            'provider': {'require_parameters': True},
+            'temperature': 0.35,
+            'max_tokens': 2600,
+            'stream': False,
+        }
         try:
-            response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=140)
+            response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=150)
         except requests.RequestException as exc:
-            last_problem = f'Error de red ({type(exc).__name__})'
-            print(f'OpenRouter intento {attempt+1}/3: {last_problem}', flush=True)
-            if attempt < 2:
-                time.sleep(2 * (attempt + 1))
-                continue
-            break
+            last_problem = 'red: ' + type(exc).__name__
+            print(f'OpenRouter modelo {i}/{len(candidates)} {model}: {last_problem}', flush=True)
+            continue
         if not response.ok:
-            detail = response.text[:500]
-            if response.status_code == 429:
-                raise RuntimeError('OpenRouter Free HTTP 429: cuota agotada o limite temporal. '
-                                   'No se usaran modelos de pago. ' + detail)
+            last_problem = f'HTTP {response.status_code}: {response.text[:180]}'
+            print(f'OpenRouter modelo {i}/{len(candidates)} {model}: {last_problem}', flush=True)
             if response.status_code in (401, 403):
-                raise RuntimeError('OpenRouter Free: revisa OPENROUTER_API_KEY. ' + detail)
-            if response.status_code not in (500, 502, 503, 504):
-                raise RuntimeError(f'OpenRouter Free HTTP {response.status_code}: {detail}')
-            last_problem = f'HTTP {response.status_code}'
-            print(f'OpenRouter intento {attempt+1}/3: {last_problem}', flush=True)
-        else:
-            try:
-                body = response.json()
-                choices = body.get('choices') or []
-                choice = choices[0] if choices else {}
-                message = choice.get('message') or {}
-                raw = message.get('content')
-                if isinstance(raw, list):
-                    raw = ''.join(part.get('text', '') for part in raw
-                                  if isinstance(part, dict) and part.get('type') in (None, 'text'))
-                finish_reason = choice.get('finish_reason', 'desconocido')
-                usage = body.get('usage') or {}
-                if finish_reason == 'length':
-                    last_problem = 'respuesta truncada (finish_reason=length)'
-                else:
-                    try:
-                        data = _validate_ai_data(_parse_ai_json(raw))
-                        break
-                    except (json.JSONDecodeError, ValueError, TypeError) as exc:
-                        last_problem = f'JSON/guion invalido: {str(exc)[:170]}'
-                print(f'OpenRouter intento {attempt+1}/3: {last_problem}; '
-                      f'modelo={body.get("model", "desconocido")}; '
-                      f'finish_reason={finish_reason}; '
-                      f'tokens={usage.get("completion_tokens", "?")}', flush=True)
-            except (ValueError, TypeError) as exc:
-                last_problem = f'Respuesta HTTP no JSON: {type(exc).__name__}'
-                print(f'OpenRouter intento {attempt+1}/3: {last_problem}', flush=True)
-        if attempt < 2:
-            time.sleep(2 * (attempt + 1))
+                raise RuntimeError('Clave OpenRouter rechazada: ' + last_problem)
+            if response.status_code == 429:
+                raise RuntimeError('Cuota OpenRouter gratuita agotada: ' + last_problem)
+            continue
+        try:
+            body = response.json()
+            choice = (body.get('choices') or [])[0]
+            message = choice.get('message') or {}
+            raw = message.get('content') or ''
+            if isinstance(raw, list):
+                raw = ''.join(part.get('text', '') for part in raw
+                              if isinstance(part, dict) and part.get('type') in (None, 'text'))
+            finish = choice.get('finish_reason', '')
+            if finish == 'length':
+                raise ValueError('respuesta truncada')
+            data = _validate_ai_data(_parse_ai_json(raw))
+            if not isinstance(data.get('visuals'), list) or len(data['visuals']) != 5:
+                raise ValueError('Se esperaban cinco microfrases')
+            print(f'OpenRouter guion válido: modelo={model}', flush=True)
+            break
+        except (ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError) as exc:
+            data = None
+            last_problem = f'JSON/guion inválido: {str(exc)[:130]}'
+            print(f'OpenRouter modelo {i}/{len(candidates)} {model}: {last_problem}', flush=True)
     if data is None:
-        raise RuntimeError('OpenRouter no genero un guion JSON valido tras tres intentos. '
-                           f'Ultimo diagnostico: {last_problem}. No se publico nada.')
+        raise RuntimeError('Ningún modelo gratuito generó JSON válido. '
+                           f'Último diagnóstico: {last_problem}. No se publicó nada.')
     # La longitud del texto visual no debe invalidar un guion válido.
     # Mantener el contenido original para la descripción y narración.
     visual_title = ajustar_texto_visual(data['title'], 38, 6)
