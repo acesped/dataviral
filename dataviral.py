@@ -512,8 +512,13 @@ async def narrate(script: str, path: Path):
 
 def render(ep, out: Path, require_voice=False):
     out.mkdir(parents=True, exist_ok=True)
-    if not ep['script'] or not ep['source']:
-        raise ValueError(f"{ep['id']}: propuesta sin guion/fuente; no se puede producir")
+    if not ep.get('script'):
+        raise ValueError(f"{ep['id']}: propuesta sin guion; no se puede producir")
+    # Las fuentes NO son un requisito del renderizado: una vista previa sirve
+    # precisamente para revisar guiones aun cuando la IA no proponga enlaces.
+    # La publicacion sigue bloqueada por publish() si faltan referencias.
+    if not ep.get('source'):
+        print(f"AVISO: {ep['id']} sin fuentes propuestas. Se generara solo vista previa; publicacion bloqueada.", flush=True)
     folder = out / ep['id']
     folder.mkdir(parents=True, exist_ok=True)
     frames = []
@@ -726,6 +731,11 @@ def main():
     (out/f"{ep['id']}-guion.json").write_text(
         json.dumps(generated,ensure_ascii=False,indent=2),encoding='utf-8')
     print(f"Guion OpenRouter creado: {ep['id']}; referencias propuestas: {generated['source'] or 'ninguna'}")
+    if args.publish and not generated.get('source'):
+        raise RuntimeError(
+            'Publicacion bloqueada: OpenRouter no propuso fuentes. '
+            'El guion JSON se guardo para revision, pero no se publicara sin referencias.'
+        )
     movie,cover=render(generated,out,require_voice=args.publish)
     if args.publish:
         # Los enlaces son sugerencias de IA, NO evidencias verificadas.
