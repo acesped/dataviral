@@ -42,7 +42,7 @@ jobs:
       INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
       INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
       IG_GRAPH_VERSION: 'v25.0'
-      IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
+      IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME || 'dato_wow_' }}
       GH_TOKEN: ${{ github.token }}
       GITHUB_REPOSITORY: ${{ github.repository }}
       GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
@@ -73,27 +73,22 @@ jobs:
           assert len({ep['id'] for ep in episodes})==500
           print('Catalogo de 500 temas cargado')
           PY
-      - name: Diagnosticar variable de Instagram
+      - name: Diagnosticar usuario Instagram
         shell: bash
         env:
-          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
-          CONFIGURED_IN_REPOSITORY: ${{ vars.IG_EXPECTED_USERNAME != '' }}
-          PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+          REPOSITORY_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
+          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME || 'dato_wow_' }}
         run: |
           set -euo pipefail
           echo "Repositorio: $GITHUB_REPOSITORY"
           echo "Rama del workflow: $GITHUB_REF"
-          if [[ "$CONFIGURED_IN_REPOSITORY" != "true" || -z "${IG_EXPECTED_USERNAME:-}" ]]; then
-            if [[ "$PUBLISH" != "true" ]]; then
-              echo "Modo vista previa: Instagram no configurado; se omite validacion."
-              exit 0
-            fi
-            echo "::error::IG_EXPECTED_USERNAME no llega desde vars.IG_EXPECTED_USERNAME."
-            echo "::error::Revisa Settings > Secrets and variables > Actions > Variables, en ESTE repositorio."
-            echo "::error::Si la guardaste en Settings > Environments, asigna ese environment al job o muévela a Repository variables."
-            exit 1
+          if [[ -z "${REPOSITORY_USERNAME:-}" ]]; then
+            echo "::warning::IG_EXPECTED_USERNAME no disponible en Repository variables; se usara el respaldo @dato_wow_."
+          else
+            echo "Usuario obtenido desde Repository variables."
           fi
-          echo "Variable Instagram recibida: @${IG_EXPECTED_USERNAME}"
+          [[ -n "${IG_EXPECTED_USERNAME:-}" ]] || { echo "::error::Usuario Instagram vacio"; exit 1; }
+          echo "Usuario esperado: @${IG_EXPECTED_USERNAME}"
       - name: Validar configuración
         shell: bash
         env:
@@ -107,7 +102,7 @@ jobs:
           if [[ "$PUBLISH" == true ]]; then
             [[ -n "${INSTAGRAM_TOKEN:-}" && -n "${INSTAGRAM_USER_ID:-}" ]] || { echo '::error::Faltan secretos de Instagram'; exit 1; }
             [[ "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]] || { echo '::error::INSTAGRAM_USER_ID no es numerico'; exit 1; }
-            [[ -n "${IG_EXPECTED_USERNAME:-}" ]] || { echo '::error::Falta variable IG_EXPECTED_USERNAME en GitHub Actions > Variables'; exit 1; }
+            [[ -n "${IG_EXPECTED_USERNAME:-}" ]] || { echo '::error::IG_EXPECTED_USERNAME vacio incluso tras aplicar respaldo'; exit 1; }
             if [[ "$AUTO" != true ]]; then
               [[ -n "$EPISODE" && "$EPISODE" == "$APPROVED" ]] || { echo '::error::Confirmar ID de episodio, o activar auto_publish'; exit 1; }
             fi
@@ -124,7 +119,7 @@ jobs:
       - name: Generar guion con OpenRouter, video y opcionalmente publicar
         shell: bash
         env:
-          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
+          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME || 'dato_wow_' }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
           INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
