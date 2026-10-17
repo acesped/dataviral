@@ -593,17 +593,66 @@ def create_ai_episode(ep):
 
 
 def select_episode(episodes, gh=None, requested=None):
+    """Selecciona un episodio pendiente con variedad de categorias y azar real.
+
+    - Un ID explicito respeta la eleccion manual (publish() aplica antidualidad).
+    - El historial remoto impide reutilizar publicaciones o envios inciertos.
+    - Entre categorias con episodios disponibles, prioriza las menos publicadas;
+      entre empates evita la ultima categoria usada, si existe alternativa.
+    - Sortea tanto la categoria como el episodio usando SystemRandom.
+    No altera el schema ni la ubicacion del estado previo.
+    """
     if requested:
-        return next((e for e in episodes if e['id']==requested), None)
-    if gh is None:
-        return episodes[0]
-    raw,_ = gh.read('dataviral/state.json')
-    states=json.loads(raw).get('episodes',{}) if raw else {}
+        return next((e for e in episodes if e['id'] == requested), None)
+
+    states = {}
+    if gh is not None:
+        raw, _ = gh.read('dataviral/state.json')
+        if raw is not None:
+            document = json.loads(raw)
+            if not isinstance(document, dict) or not isinstance(document.get('episodes'), dict):
+                raise RuntimeError('Estado remoto de DataViral invalido; no se seleccionara episodio')
+            states = document['episodes']
+
+    blocked = {'publicado', 'enviando', 'incierto'}
+    by_category = {}
+    published_counts = {}
+    recent = []
     for ep in episodes:
-        row=states.get(ep['id'],{})
-        if row.get('reel') not in ('publicado','enviando','incierto'):
-            return ep
-    raise RuntimeError('Los 500 episodios ya están publicados o bloqueados por incertidumbre')
+        category = ep['category']
+        row = states.get(ep['id'], {})
+        if not isinstance(row, dict):
+            raise RuntimeError('Registro de estado invalido para ' + ep['id'])
+        statuses = [row.get(field) for field in ('reel', 'foto', 'feed_video')]
+        if any(status in blocked for status in statuses):
+            if 'publicado' in statuses:
+                published_counts[category] = published_counts.get(category, 0) + 1
+                if row.get('updated_at'):
+                    recent.append((str(row['updated_at']), category))
+            continue
+        by_category.setdefault(category, []).append(ep)
+        published_counts.setdefault(category, 0)
+
+    if not by_category:
+        raise RuntimeError('Los 500 episodios ya estan publicados o bloqueados por incertidumbre')
+
+    # Equilibrio entre categorias; no completar cien episodios de una sola.
+    minimum = min(published_counts[category] for category in by_category)
+    eligible_categories = [category for category in by_category
+                           if published_counts[category] == minimum]
+    if recent and len(eligible_categories) > 1:
+        last_category = max(recent, key=lambda pair: pair[0])[1]
+        others = [category for category in eligible_categories if category != last_category]
+        if others:
+            eligible_categories = others
+
+    rng = random.SystemRandom()
+    chosen_category = rng.choice(eligible_categories)
+    selected = rng.choice(by_category[chosen_category])
+    print(f'Episodio aleatorio equilibrado: {selected["id"]} | '
+          f'categoria: {chosen_category} | '
+          f'publicados de esa categoria: {published_counts[chosen_category]}', flush=True)
+    return selected
 
 
 def now():
@@ -655,11 +704,10 @@ def scene(ep, number, dest):
         d.ellipse((x-r, y-r, x+r, y+r), outline=(*accent, rng.randrange(22, 90)), width=rng.randrange(2, 8))
     d.rounded_rectangle((52, 72, 668, 152), 24, fill=(255, 255, 255, 18), outline=(*accent, 200), width=3)
     d.text((77, 91), 'D A T A V I R A L', font=font(33, True), fill=(255, 255, 255))
-    d.text((55, 187), f"{ep['id']}   /   {ep['category'].upper()}", font=font(19, True), fill=accent)
+    d.text((55, 187), ep['category'].upper(), font=font(19, True), fill=accent)
     # Zona segura central: sin párrafos de narración ni frases truncadas.
     titulares = microfrases(ep)
     texto_centrado_seguro(d, titulares[number], centro_y=600, ancho=550, max_lineas=2)
-    d.text((76, 940), f'IDEA {number + 1} / 5', font=font(23, True), fill=accent)
     d.line((58, 1128, 662, 1128), fill=accent, width=5)
     d.text((92, 1154), 'DATO WOW  ·  20 SEGUNDOS', font=font(23, True), fill='white')
     img.save(dest, quality=92)
