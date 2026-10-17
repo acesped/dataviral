@@ -73,6 +73,27 @@ jobs:
           assert len({ep['id'] for ep in episodes})==500
           print('Catalogo de 500 temas cargado')
           PY
+      - name: Diagnosticar variable de Instagram
+        shell: bash
+        env:
+          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
+          CONFIGURED_IN_REPOSITORY: ${{ vars.IG_EXPECTED_USERNAME != '' }}
+          PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          echo "Repositorio: $GITHUB_REPOSITORY"
+          echo "Rama del workflow: $GITHUB_REF"
+          if [[ "$CONFIGURED_IN_REPOSITORY" != "true" || -z "${IG_EXPECTED_USERNAME:-}" ]]; then
+            if [[ "$PUBLISH" != "true" ]]; then
+              echo "Modo vista previa: Instagram no configurado; se omite validacion."
+              exit 0
+            fi
+            echo "::error::IG_EXPECTED_USERNAME no llega desde vars.IG_EXPECTED_USERNAME."
+            echo "::error::Revisa Settings > Secrets and variables > Actions > Variables, en ESTE repositorio."
+            echo "::error::Si la guardaste en Settings > Environments, asigna ese environment al job o muévela a Repository variables."
+            exit 1
+          fi
+          echo "Variable Instagram recibida: @${IG_EXPECTED_USERNAME}"
       - name: Validar configuración
         shell: bash
         env:
@@ -103,6 +124,10 @@ jobs:
       - name: Generar guion con OpenRouter, video y opcionalmente publicar
         shell: bash
         env:
+          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
+          INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
           PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
           AUTO: ${{ inputs.auto_publish && 'true' || 'false' }}
           EPISODE: ${{ inputs.episode_id }}
