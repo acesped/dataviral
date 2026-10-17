@@ -285,38 +285,62 @@ def create_ai_episode(ep):
             {'role': 'user', 'content': prompt},
         ],
         'temperature': 0.45,
-        'max_tokens': 1100,
+        'max_tokens': 3200,
         'stream': False,
     }
-    response = requests.post(
-        OPENROUTER_URL,
-        headers={
-            'Authorization': f'Bearer {key}',
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://github.com',
-            'X-Title': 'Dato Wow - DataViral',
-        },
-        json=payload,
-        timeout=110,
-    )
-    if not response.ok:
-        detail = response.text[:500]
-        if response.status_code == 429:
-            raise RuntimeError('OpenRouter Free HTTP 429: cuota o límite temporal agotado. '
-                               'No se usarán modelos de pago. ' + detail)
-        if response.status_code in (401, 403):
-            raise RuntimeError('OpenRouter Free: revisa OPENROUTER_API_KEY y permisos. ' + detail)
-        raise RuntimeError(f'OpenRouter Free HTTP {response.status_code}: {detail}')
-    body = response.json()
-    choices = body.get('choices') or []
-    if not choices:
-        raise RuntimeError('OpenRouter no devolvió respuesta utilizable')
-    message = choices[0].get('message') or {}
-    raw = message.get('content')
-    if isinstance(raw, list):
-        raw = ''.join(x.get('text', '') for x in raw if isinstance(x, dict))
-    if not isinstance(raw, str) or not raw.strip():
-        raise RuntimeError('OpenRouter devolvió respuesta vacía')
+    headers = {
+        'Authorization': f'Bearer {key}',
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://github.com',
+        'X-Title': 'Dato Wow - DataViral',
+    }
+    # El router gratuito puede elegir modelos con razonamiento extenso. Una
+    # respuesta HTTP 200 puede traer content vacio cuando el presupuesto de
+    # tokens se agota en razonamiento. Reintentar una vez con mayor presupuesto;
+    # nunca usar modelos de pago ni publicar contenido inexistente.
+    for attempt in range(2):
+        response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=140)
+        if not response.ok:
+            detail = response.text[:500]
+            if response.status_code == 429:
+                raise RuntimeError('OpenRouter Free HTTP 429: cuota o límite temporal agotado. '
+                                   'No se usarán modelos de pago. ' + detail)
+            if response.status_code in (401, 403):
+                raise RuntimeError('OpenRouter Free: revisa OPENROUTER_API_KEY y permisos. ' + detail)
+            raise RuntimeError(f'OpenRouter Free HTTP {response.status_code}: {detail}')
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise RuntimeError('OpenRouter devolvió JSON HTTP inválido') from exc
+        choices = body.get('choices') or []
+        choice = choices[0] if choices else {}
+        message = choice.get('message') or {}
+        raw = message.get('content')
+        if isinstance(raw, list):
+            raw = ''.join(part.get('text', '') for part in raw
+                          if isinstance(part, dict) and part.get('type') in (None, 'text'))
+        if isinstance(raw, str) and raw.strip():
+            break
+        finish_reason = choice.get('finish_reason', 'sin_finish_reason')
+        usage = body.get('usage') or {}
+        details = usage.get('completion_tokens_details') or {}
+        model_used = body.get('model', 'desconocido')
+        print(f'OpenRouter: respuesta sin texto; intento {attempt+1}/2, '
+              f'modelo={model_used}, finish_reason={finish_reason}, '
+              f'tokens_generados={usage.get("completion_tokens", "?")}, '
+              f'tokens_razonamiento={details.get("reasoning_tokens", "?")}',
+              flush=True)
+        if attempt == 0:
+            payload['max_tokens'] = 6400
+            # Preserva el requisito de responder JSON, pero pide una respuesta
+            # corta y directa con margen suficiente para modelos razonadores.
+            payload['messages'][0]['content'] += ' Responde directamente; usa poco razonamiento.'
+        else:
+            raise RuntimeError(
+                'OpenRouter devolvió dos respuestas sin texto. '
+                'Prueba otro modelo :free disponible o reintenta más tarde; '
+                'no se generó ni publicó video.'
+            )
     data = _parse_ai_json(raw)
     if not isinstance(data, dict):
         raise RuntimeError('La respuesta de IA no es un objeto JSON')
