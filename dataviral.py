@@ -671,6 +671,48 @@ def publish_container(user_id, token, video_url, caption):
                   data={'creation_id': container})['id']
 
 
+
+def upload_video_to_public_github(gh, movie: Path, episode_id: str):
+    """Sube un MP4 con nombre inmutable, sin modificar el estado histórico.
+
+    Evita el conflicto 409 si un nombre de carpeta ya existe como archivo.
+    Solo cambia la carpeta de medios; el estado sigue en dataviral/state.json.
+    """
+    movie_bytes = movie.read_bytes()
+    digest = hashlib.sha256(movie_bytes).hexdigest()[:16]
+    filename = f'{episode_id}-{digest}.mp4'
+    # Nombres independientes del antiguo dataviral/media. Si un antecesor
+    # de cualquiera es un archivo, probamos el siguiente directorio.
+    roots = ('datoviral_assets/media', 'datoviral_video_assets/media',
+             'datoviral_public_videos/media')
+    for root in roots:
+        remote = f'{root}/{filename}'
+        try:
+            old, _ = gh.read(remote)
+        except (KeyError, TypeError) as exc:
+            # GitHub Contents responde distinto si la ruta ya es un directorio
+            # u otro objeto; no convertir errores ambiguos en sobrescrituras.
+            raise RuntimeError(f'No se pudo inspeccionar ruta GitHub {remote}: {exc}') from exc
+        if old is not None:
+            if old != movie_bytes:
+                raise RuntimeError(f'Colisión: existe otro archivo en {remote}')
+            commit = gh.request('GET', f'/commits/{gh.branch}')['sha']
+            print(f'Video ya almacenado en GitHub: {remote}', flush=True)
+            return remote, commit
+        try:
+            result = gh.write(remote, movie_bytes)
+        except RuntimeError as exc:
+            message = str(exc)
+            if 'HTTP 409' in message and ('subdirectory' in message or 'file exists' in message):
+                print(f'Aviso: conflicto de ruta de medios {remote}; probando alternativa.', flush=True)
+                continue
+            raise
+        print(f'Video almacenado en GitHub: {remote}', flush=True)
+        return remote, result['commit']['sha']
+    raise RuntimeError('GitHub: todos los directorios alternativos de video chocan con archivos. '
+                       'Revisar manualmente la estructura del repositorio; no se publicó en Instagram.')
+
+
 def publish(ep, movie, cover, approval):
     if approval != ep['id']:
         raise ValueError('Se exige aprobación explícita del mismo ID de episodio')
@@ -700,15 +742,7 @@ def publish(ep, movie, cover, approval):
         sha = result['content']['sha']
     # Subida de archivos a un repositorio público: URL estable de commit. El tamaño
     # máximo de GitHub Contents API es 100 MB; no es un CDN de producción.
-    remote = f'dataviral/media/{ep["id"]}-{hashlib.sha256(movie.read_bytes()).hexdigest()[:16]}.mp4'
-    old, oldsha = gh.read(remote)
-    if old is None:
-        result = gh.write(remote, movie.read_bytes())
-        commit = result['commit']['sha']
-    else:
-        if old != movie.read_bytes():
-            raise RuntimeError('Colisión de archivo remoto')
-        commit = gh.request('GET', f'/commits/{gh.branch}')['sha']
+    remote, commit = upload_video_to_public_github(gh, movie, ep['id'])
     video_url = f'https://raw.githubusercontent.com/{gh.repo}/{commit}/{remote}'
     response = requests.get(video_url, timeout=60)
     if not response.ok or len(response.content) != movie.stat().st_size:
