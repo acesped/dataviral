@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DataViral: catálogo integrado (500 propuestas), previews y publicación de VIDEO en Reels y feed de IG.
+"""DataViral: catálogo integrado (500 propuestas), previews y publicación de VIDEO en Reels, feed y Stories de IG.
 
 Las referencias son opcionales; la ausencia de fuentes no impide publicar.
 Los datos generados por IA no están verificados independientemente.
@@ -1106,6 +1106,29 @@ def publish_container(user_id, token, video_url, caption):
                   data={'creation_id': container})['id']
 
 
+def publish_story_container(user_id, token, video_url):
+    """Crea una Story de video independiente mediante Instagram Login API.
+
+    No incluye caption ni share_to_feed: esos campos son del Reel.
+    Un fallo tras media_publish puede ser ambiguo; el estado remoto se deja
+    en 'incierto' para impedir una duplicación accidental.
+    """
+    fields = {'media_type': 'STORIES', 'video_url': video_url}
+    container = ig_api('POST', f'{user_id}/media', token=token, data=fields)['id']
+    for _ in range(30):
+        time.sleep(10)
+        status = ig_api('GET', container, token=token,
+                        data={'fields': 'status_code,status'})
+        if status.get('status_code') == 'FINISHED':
+            break
+        if status.get('status_code') in ('ERROR', 'EXPIRED'):
+            raise RuntimeError(f'Contenedor Story Instagram {container}: {status}')
+    else:
+        raise RuntimeError(f'Timeout contenedor Story IG {container}; reconciliar antes de reintentar')
+    return ig_api('POST', f'{user_id}/media_publish', token=token,
+                  data={'creation_id': container})['id']
+
+
 
 def upload_video_to_public_github(gh, movie: Path, episode_id: str):
     """Sube un MP4 con nombre inmutable, sin modificar el estado histórico.
@@ -1215,9 +1238,32 @@ def publish(ep, movie, cover, approval):
     row['reel'] = 'publicado'
     row['share_to_feed'] = True
     row['reel_id'] = published
+    row['video_url'] = video_url
     row['updated_at'] = now()
     save()
-    print(f'Video publicado como Reel Y visible en el feed: {published}')
+    print(f'Video publicado como Reel Y visible en el feed: {published}', flush=True)
+    # Story independiente: nunca borrar ni degradar 'reel=publicado' si falla.
+    # Guardar estado 'enviando' ANTES de llamar a Instagram y 'incierto' si
+    # hubo error (incluye fallos cuya publicación pudo haber ocurrido).
+    row['story'] = 'enviando'
+    row['updated_at'] = now()
+    save()
+    try:
+        story_id = publish_story_container(user_id, token, video_url)
+    except BaseException:
+        row['story'] = 'incierto'
+        row['updated_at'] = now()
+        try:
+            save()
+        except Exception as ex:
+            print(f'ALERTA: sin persistencia del estado incierto Story: {ex}', file=sys.stderr)
+        print('Reel publicado. Story incierta o fallida; NO se repetirá el Reel.', file=sys.stderr)
+        raise
+    row['story'] = 'publicado'
+    row['story_id'] = story_id
+    row['updated_at'] = now()
+    save()
+    print(f'Story publicada: {story_id}', flush=True)
 
 
 def main():
@@ -1225,7 +1271,7 @@ def main():
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--episode', default='', help='ID concreto; vacío = siguiente disponible')
     ap.add_argument('--out', default='output')
-    ap.add_argument('--publish', action='store_true', help='Publicar Reel visible en feed')
+    ap.add_argument('--publish', action='store_true', help='Publicar Reel en feed y Story independiente')
     ap.add_argument('--approved-id', default='', help='ID revisado manualmente (modo seguro)')
     ap.add_argument('--auto-publish', action='store_true', help='Publicación autónoma (sin revisión humana)')
     args=ap.parse_args()
