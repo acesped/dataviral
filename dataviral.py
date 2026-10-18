@@ -978,13 +978,170 @@ def palette(i):
     ][i % 5]
 
 
-def scene(ep, number, dest):
+# Solo fotografías CC0 o de dominio público: no precisan atribución obligatoria.
+# Se conserva la procedencia en creditos_imagenes.json para trazabilidad.
+IMAGE_LICENSES = {'cc0', 'pdm'}
+IMAGE_HEADERS = {
+    'User-Agent': 'DatoWowEducationalBot/1.2 (https://github.com/acesped/dataviral; contact via GitHub issues)',
+    'Accept': 'application/json, image/jpeg, image/png, image/webp, */*;q=0.5',
+}
+
+
+def _image_request(url, *, params=None, stream=False, timeout=20):
+    """Segundo intento moderado para límites transitorios; sin bucles agresivos."""
+    for attempt in range(2):
+        r = requests.get(url, params=params, headers=IMAGE_HEADERS, timeout=timeout, stream=stream)
+        if r.status_code in (429, 502, 503, 504) and attempt == 0:
+            r.close()
+            time.sleep(2)
+            continue
+        r.raise_for_status()
+        return r
+    raise RuntimeError('Servicio de imágenes no disponible')
+
+
+def _safe_photo_download(url, target):
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    # Rechazar enlaces inseguros y direcciones internas; solo proveedores públicos conocidos.
+    host = (parsed.hostname or '').lower()
+    if parsed.scheme != 'https' or not host or host in ('localhost',) or host.endswith('.local'):
+        return False
+    try:
+        with _image_request(url, stream=True, timeout=22) as r:
+            kind = r.headers.get('Content-Type', '').lower()
+            if not any(t in kind for t in ('image/jpeg', 'image/png', 'image/webp')):
+                return False
+            payload = bytearray()
+            for chunk in r.iter_content(65536):
+                if chunk:
+                    payload.extend(chunk)
+                if len(payload) > 10_000_000:
+                    return False
+        from PIL import ImageOps
+        with Image.open(io.BytesIO(payload)) as img:
+            img = ImageOps.exif_transpose(img)
+            if img.width < 420 or img.height < 300:
+                return False
+            img.convert('RGB').save(target, 'JPEG', quality=86)
+        return True
+    except Exception as exc:
+        print(f'Imagen descartada: {type(exc).__name__}: {str(exc)[:150]}', flush=True)
+        return False
+
+
+def _strip_html(value):
+    return re.sub(r'<[^>]*>', '', str(value or '')).strip()
+
+
+def _commons_candidates(query):
+    params = {'action':'query', 'format':'json', 'generator':'search',
+              'gsrsearch':'filetype:bitmap ' + query, 'gsrnamespace':6,
+              'gsrlimit':18, 'prop':'imageinfo', 'iiprop':'url|extmetadata',
+              'iiurlwidth':900}
+    with _image_request('https://commons.wikimedia.org/w/api.php', params=params) as r:
+        pages = r.json().get('query', {}).get('pages', {})
+    for page in pages.values():
+        info = (page.get('imageinfo') or [{}])[0]
+        meta = info.get('extmetadata') or {}
+        lic = _strip_html((meta.get('LicenseShortName') or {}).get('value','')).lower().replace(' ','')
+        free_of_attribution = ('cc0' in lic or 'publicdomain' in lic or
+                               lic in ('pd','pdm','dominiopúblico','dominiopublico') or
+                               lic.startswith('pd-'))
+        if not free_of_attribution or any(x in lic for x in ('cc-by','-nc','-nd')):
+            continue
+        url = info.get('thumburl') or info.get('url')
+        if url:
+            yield {'url':url, 'title':page.get('title',''),
+                   'author':_strip_html((meta.get('Artist') or {}).get('value','')),
+                   'license':lic, 'source':info.get('descriptionurl','')}
+
+
+def _openverse_candidates(query):
+    with _image_request('https://api.openverse.org/v1/images/',
+                        params={'q':query, 'license':'cc0,pdm', 'page_size':20}, timeout=20) as r:
+        items = r.json().get('results', [])
+    for item in items:
+        lic = str(item.get('license') or '').lower()
+        if lic not in IMAGE_LICENSES:
+            continue
+        url = item.get('url') or item.get('thumbnail')
+        if url:
+            yield {'url':url, 'title':item.get('title',''), 'author':item.get('creator',''),
+                   'license':lic, 'source':item.get('foreign_landing_url','')}
+
+
+def _image_queries(ep):
+    """Búsquedas de fotografías sobre el contenido real, con alternativas temáticas.
+
+    Evita representar como exactos dispositivos/modelos que no estén verificados.
+    """
+    original = re.sub(r'\s+', ' ', str(ep.get('image_query') or ep.get('title') or '')).strip()[:110]
+    category = str(ep.get('category', '')).lower()
+    general = {
+        'psicología': 'human brain neuroscience psychology',
+        'ciencia': 'nature science research biology',
+        'tecnología': 'technology computer electronics engineering',
+        'historia': 'historic museum history artifacts',
+        'seguridad': 'everyday safety public education',
+    }
+    fallback = next((v for k, v in general.items() if k in category), 'science educational photography')
+    # Empezar por el tema exacto; añadir alternativas más amplias si no hay fotos.
+    queries = [original, (original + ' science illustration') if original else '', fallback]
+    return [q for i, q in enumerate(queries) if q and q not in queries[:i]], []
+
+
+def prepare_photos(ep, folder):
+    """Busca hasta 5 fotografías CC0/PD, con trazabilidad y respaldo animado."""
+    queries, models = _image_queries(ep)
+    photos, credits, used = [], [], set()
+    print(f'Imágenes: consultas={queries!r} (solo CC0/dominio público)', flush=True)
+    for query in queries:
+        if len(photos) == 5:
+            break
+        for backend in (_commons_candidates, _openverse_candidates):
+            if len(photos) == 5:
+                break
+            try:
+                candidates = list(backend(query))
+                print(f'Imágenes: {backend.__name__} encontró {len(candidates)} candidatas para {query!r}', flush=True)
+                for candidate in candidates:
+                    if len(photos) == 5:
+                        break
+                    url = candidate['url']
+                    if url in used:
+                        continue
+                    used.add(url)
+                    title = (str(candidate.get('title',''))+' '+str(candidate.get('source',''))).lower()
+                    if models and not all(x.lower().replace(' ','') in title.replace(' ','') for x in models):
+                        continue
+                    path = folder / f'foto_{len(photos)}.jpg'
+                    if _safe_photo_download(url, path):
+                        photos.append(path)
+                        credits.append(candidate)
+            except Exception as exc:
+                print(f'Fuente fotográfica no disponible: {backend.__name__}: {type(exc).__name__}: {str(exc)[:120]}', flush=True)
+    (folder/'creditos_imagenes.json').write_text(json.dumps(credits, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(f'Imágenes: {len(photos)}/5 fotos descargadas; '+
+          ('usando fotografías reales' if photos else 'usando fondos animados de respaldo'), flush=True)
+    return photos, credits
+
+
+def _photo_background(image_path, w=720, h=1280):
+    from PIL import ImageOps, ImageEnhance
+    with Image.open(image_path) as raw:
+        base=ImageOps.fit(raw.convert('RGB'),(w,h),method=Image.Resampling.LANCZOS)
+        base=ImageEnhance.Brightness(base).enhance(0.48)
+        return base
+
+
+def scene(ep, number, dest, photo=None):
     W, H = 720, 1280
     bg, accent = palette(number + int(ep['id'][-3:]))
-    img = Image.new('RGB', (W, H), bg)
+    img = _photo_background(photo, W, H) if photo else Image.new('RGB', (W, H), bg)
     d = ImageDraw.Draw(img, 'RGBA')
     rng = random.Random(ep['id'] + str(number))
-    for _ in range(22):
+    for _ in range(8 if photo else 22):
         x, y = rng.randrange(-150, 800), rng.randrange(-150, 1400)
         r = rng.randrange(15, 145)
         d.ellipse((x-r, y-r, x+r, y+r), outline=(*accent, rng.randrange(22, 90)), width=rng.randrange(2, 8))
@@ -1033,10 +1190,12 @@ def render(ep, out: Path, require_voice=False):
         print(f"AVISO: {ep['id']} sin fuentes propuestas; contenido no verificado independientemente.", flush=True)
     folder = out / ep['id']
     folder.mkdir(parents=True, exist_ok=True)
+    photos, image_credits = prepare_photos(ep, folder)
+    ep['image_credits'] = image_credits
     frames = []
     for i in range(5):
         path = folder / f'escena_{i}.jpg'
-        scene(ep, i, path)
+        scene(ep, i, path, photos[i % len(photos)] if photos else None)
         frames.append(path)
     cover = out / f"{ep['id']}.jpg"
     cover.write_bytes(frames[0].read_bytes())
