@@ -271,8 +271,8 @@ def _validate_ai_data(data):
         if not isinstance(data.get(field), str) or not data[field].strip():
             raise ValueError(f'Guion de IA sin campo requerido: {field}')
     words = len(data['script'].split())
-    if not 38 <= words <= 54:
-        raise ValueError(f'Duración incompatible: {words} palabras (38-54 requeridas)')
+    if not 30 <= words <= 60:
+        raise ValueError(f'Duración incompatible: {words} palabras (30-60 aceptadas)')
     return data
 
 
@@ -472,8 +472,8 @@ def _normalize_ai_fields(data):
         if not isinstance(data.get(field), str) or not data[field].strip():
             raise ValueError('Falta ' + field)
     words = len(data['script'].split())
-    if not 38 <= words <= 54:
-        raise ValueError(f'Guion de {words} palabras; requiere entre 38 y 54')
+    if not 30 <= words <= 60:
+        raise ValueError(f'Guion de {words} palabras; requiere entre 30 y 60')
     visuals = data.get('visuals')
     if not isinstance(visuals, list) or len(visuals) != 5 or not all(isinstance(v, str) and v.strip() for v in visuals):
         raise ValueError('Deben existir cinco frases visuales')
@@ -567,7 +567,7 @@ def _free_prompt(ep, mode):
         'Aprendizaje: ' + str(ep.get('lesson', ''))[:210] + '. '
     )
     instruction = (
-        'Eres guionista educativo en español. Crea UN guion de 38 a 54 palabras '
+        'Eres guionista educativo en español. Crea UN guion de 42 a 50 palabras '
         'que explique un hecho concreto sin inventar cifras. Escribe cinco '
         'microfrases de 3 a 9 palabras y máximo 52 caracteres cada una, '
         'específicas y relacionadas con las afirmaciones del guion, no títulos '
@@ -666,8 +666,8 @@ def _parse_narration(raw):
     obj['fact'] = str(obj.get('fact') or obj.get('lesson') or obj['title']).strip()
     obj['lesson'] = str(obj.get('lesson') or obj.get('fact') or obj['title']).strip()
     words = len(obj['script'].split())
-    if not 38 <= words <= 54:
-        raise ValueError(f'guion de {words} palabras, se requieren 38-54')
+    if not 30 <= words <= 60:
+        raise ValueError(f'guion de {words} palabras, se requieren 30-60')
     return obj
 
 
@@ -749,9 +749,9 @@ def create_ai_episode(ep):
         f"Enseñanza deseada: {str(ep.get('lesson', ''))[:160]}."
     )
     narration_prompt = (
-        'Redacta un guion educativo sorprendente pero preciso, con ENTRE 38 Y 54 PALABRAS '
-        'en español para narrar en 20 segundos. Forma CINCO oraciones completas ' 
-        'de 7 a 11 palabras; deben avanzar de causa a conclusión y ser comprensibles ' 
+        'Redacta un guion educativo sorprendente pero preciso, IDEALMENTE 42 A 50 PALABRAS '
+        'en español para narrar en 20 segundos. Escribe de cuatro a seis oraciones completas ' 
+        'con ideas concretas; deben avanzar de causa a conclusión y ser comprensibles ' 
         'por sí solas. Sin cifras inventadas, sin introducciones vacías, '
         'sin consejos médicos o de emergencia no verificados. Responde SOLO cuatro líneas, '
         'sin Markdown: TITULO: ...\nGUION: ...\nDATO: ...\nLECCION: ...\n' + intro
