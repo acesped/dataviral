@@ -778,15 +778,167 @@ def _mensajes_locales_desde_guion(narration):
     return _recuperar_mensajes(narration)
 
 
+# Orden de proveedores configurable, sin nuevas dependencias.
+# Las cuentas gratuitas están sujetas a cuotas propias; no se garantiza cuota infinita.
+GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
+GEMINI_API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models/'
+
+
+def _provider_credentials():
+    providers = []
+    for name, secret in (('groq', 'GROQ_API_KEY'), ('gemini', 'GEMINI_API_KEY'),
+                         ('openrouter', 'OPENROUTER_API_KEY')):
+        key = os.getenv(secret, '').strip()
+        if key:
+            providers.append((name, key))
+    if not providers:
+        raise RuntimeError('Configura al menos una clave: GROQ_API_KEY, GEMINI_API_KEY u OPENROUTER_API_KEY')
+    return providers
+
+
+def _discover_groq_models(key):
+    """Consulta el catálogo accesible para esta API key, sin suponer IDs vigentes."""
+    preferred = ('openai/gpt-oss-20b', 'openai/gpt-oss-120b',
+                 'llama-3.3-70b-versatile', 'llama-3.1-8b-instant')
+    response = requests.get('https://api.groq.com/openai/v1/models',
+                            headers={'Authorization': f'Bearer {key}'}, timeout=25)
+    response.raise_for_status()
+    available = {row.get('id') for row in response.json().get('data', [])
+                 if isinstance(row, dict) and isinstance(row.get('id'), str)}
+    chosen = os.getenv('GROQ_MODEL', '').strip()
+    # Only general text generation models: avoid audio, guard, vision, or tooling.
+    allowed = [mid for mid in preferred if mid in available]
+    if chosen and chosen in available and chosen not in allowed:
+        allowed.insert(0, chosen)
+    elif chosen in allowed:
+        allowed.remove(chosen)
+        allowed.insert(0, chosen)
+    return allowed[:3]
+
+
+def _discover_gemini_models(key):
+    """Lista modelos con generateContent y prioriza Flash-Lite (no TTS/imágenes)."""
+    preferred = ('gemini-3.1-flash-lite', 'gemini-3.5-flash-lite',
+                 'gemini-3.6-flash', 'gemini-3.8-flash')
+    found = set()
+    page = None
+    for _ in range(5):
+        params = {'pageSize': 100}
+        if page:
+            params['pageToken'] = page
+        response = requests.get('https://generativelanguage.googleapis.com/v1beta/models',
+                                headers={'x-goog-api-key': key}, params=params, timeout=25)
+        response.raise_for_status()
+        payload = response.json()
+        for row in payload.get('models', []):
+            if 'generateContent' in row.get('supportedGenerationMethods', []):
+                name = str(row.get('name', '')).removeprefix('models/')
+                if name:
+                    found.add(name)
+        page = payload.get('nextPageToken')
+        if not page:
+            break
+    chosen = os.getenv('GEMINI_MODEL', '').strip().removeprefix('models/')
+    allowed = [mid for mid in preferred if mid in found]
+    if chosen and chosen in found and chosen not in allowed:
+        allowed.insert(0, chosen)
+    elif chosen in allowed:
+        allowed.remove(chosen)
+        allowed.insert(0, chosen)
+    return allowed[:3]
+
+
+def _ai_candidates():
+    result = []
+    for provider, key in _provider_credentials():
+        if provider == 'groq':
+            try:
+                models = _discover_groq_models(key)
+                result.extend((provider, model, key) for model in models)
+                if not models:
+                    print('Groq: sin modelos de texto compatibles accesibles con esta clave', flush=True)
+            except (requests.RequestException, ValueError, KeyError) as exc:
+                print(f'Groq: no se pudo consultar catálogo: {str(exc)[:160]}', flush=True)
+        elif provider == 'gemini':
+            try:
+                models = _discover_gemini_models(key)
+                result.extend((provider, model, key) for model in models)
+                if not models:
+                    print('Gemini: sin modelos Flash compatibles accesibles con esta clave', flush=True)
+            except (requests.RequestException, ValueError, KeyError) as exc:
+                print(f'Gemini: no se pudo consultar catálogo: {str(exc)[:160]}', flush=True)
+        else:
+            try:
+                result.extend((provider, model, key) for model, _ in select_free_json_models(key, 5))
+            except (requests.RequestException, ValueError, RuntimeError) as exc:
+                print(f'OpenRouter: no se pudieron listar modelos gratuitos: {exc}', flush=True)
+    if not result:
+        raise RuntimeError('Ningún proveedor ofrece modelos compatibles accesibles; revisa las claves y las cuotas.')
+    return result
+
+
+def _response_visible_text(response, provider):
+    if response.status_code in (401, 403):
+        raise ValueError(f'{provider}: clave o acceso rechazado (HTTP {response.status_code})')
+    if response.status_code == 429:
+        raise ValueError(f'{provider}: cuota o límite temporal (HTTP 429)')
+    if not response.ok:
+        raise ValueError(f'{provider}: HTTP {response.status_code}: {response.text[:200]}')
+    data = response.json()
+    if provider == 'gemini':
+        choices = data.get('candidates') or []
+        pieces = (choices[0].get('content') or {}).get('parts') or [] if choices else []
+        output = ''.join(part.get('text','') for part in pieces if isinstance(part, dict))
+    else:
+        choices = data.get('choices') or []
+        content = (choices[0].get('message') or {}).get('content', '') if choices else ''
+        output = (''.join(x.get('text','') for x in content if isinstance(x,dict))
+                  if isinstance(content,list) else content)
+    if not isinstance(output,str) or not output.strip():
+        raise ValueError(f'{provider}: respuesta sin texto visible')
+    return output.strip()
+
+
+def _provider_text(provider, model, key, prompt, *, max_tokens=1500):
+    if provider == 'openrouter':
+        try:
+            return _openrouter_text(key, model, prompt, max_tokens=max_tokens)
+        except RuntimeError as exc:
+            # Agotamiento de cuota: registrar el fallo, no abortar los otros proveedores.
+            if 'cuota gratuita' in str(exc).lower():
+                raise ValueError(str(exc)) from exc
+            raise
+    if provider == 'groq':
+        response = requests.post(
+            GROQ_URL,
+            headers={'Authorization': f'Bearer {key}', 'Content-Type':'application/json'},
+            json={'model':model, 'messages':[
+                {'role':'system', 'content':'Responde exclusivamente en español y con el formato pedido.'},
+                {'role':'user','content':prompt}],
+                'temperature':0.2, 'max_tokens':min(max_tokens, 2048)},
+            timeout=110)
+        return _response_visible_text(response, provider)
+    if provider == 'gemini':
+        response = requests.post(
+            GEMINI_API_ROOT + urllib.parse.quote(model, safe='') + ':generateContent',
+            headers={'x-goog-api-key':key,'Content-Type':'application/json'},
+            json={'contents':[{'parts':[{'text':prompt}]}],
+                  'generationConfig':{'maxOutputTokens':min(max_tokens,2048)}},
+            timeout=110)
+        return _response_visible_text(response, provider)
+    raise ValueError(f'Proveedor desconocido: {provider}')
+
+
+
+
 def create_ai_episode(ep):
     """Dos etapas cortas: narración, después cinco mensajes visuales.
 
     Evita pedir un gran JSON. Solo usa modelos con prompt/completion gratuitos;
     si alguno falla por saturación o salida truncada prueba el siguiente.
     """
-    key = credential('OPENROUTER_API_KEY', TEST_OPENROUTER_API_KEY)
-    candidates = select_free_json_models(key, 7)
-    print('Modelos gratuitos disponibles: ' + ', '.join(mid for mid, _ in candidates), flush=True)
+    candidates = _ai_candidates()
+    print('Proveedores disponibles: ' + ', '.join(f'{provider}:{model}' for provider, model, _ in candidates), flush=True)
     intro = (
         f"Tema: {str(ep.get('title', ''))[:140]}. "
         f"Categoría: {str(ep.get('category', ''))[:70]}. "
@@ -803,20 +955,25 @@ def create_ai_episode(ep):
     narration = None
     narration_model = None
     last_problem = 'sin respuesta'
-    for model, _ in candidates:
+    providers_exhausted = set()
+    for provider, model, key in candidates:
+        if provider in providers_exhausted:
+            continue
         try:
-            raw = _openrouter_text(key, model, narration_prompt, max_tokens=2800)
+            raw = _provider_text(provider, model, key, narration_prompt, max_tokens=1500)
             narration = _parse_narration(raw)
-            narration_model = model
-            print(f'Narración validada con {model}', flush=True)
+            narration_model = f'{provider}:{model}'
+            print(f'Narración validada con {narration_model}', flush=True)
             break
         except RuntimeError:
             raise
         except (ValueError, requests.RequestException, KeyError, TypeError) as exc:
-            last_problem = f'{model}: {str(exc)[:140]}'
-            print(f'OpenRouter etapa 1: {last_problem}', flush=True)
+            last_problem = f'{provider}/{model}: {str(exc)[:140]}'
+            if provider == 'openrouter' and 'cuota gratuita' in str(exc).lower():
+                providers_exhausted.add(provider)
+            print(f'IA etapa 1: {last_problem}', flush=True)
     if narration is None:
-        raise RuntimeError('Ningún modelo gratuito generó narración válida. '
+        raise RuntimeError('Ningún proveedor configurado generó narración válida. '
                            f'Último diagnóstico: {last_problem}. No se publicó nada.')
 
     # No volver a generar el guion cuando fallan los mensajes visuales.
@@ -836,22 +993,24 @@ def create_ai_episode(ep):
     # Antes de otra solicitud, no hay parámetro costoso de razonamiento forzado:
     # muchos proveedores gratuitos no lo admiten; los prompts cortos reducen consumo.
     # El modelo que completó bien la narración recibe la primera oportunidad.
-    visual_candidates = sorted(candidates, key=lambda row: row[0] != narration_model)
-    for model, _ in visual_candidates:
+    visual_candidates = sorted(candidates, key=lambda row: f'{row[0]}:{row[1]}' != narration_model)
+    for provider, model, key in visual_candidates:
         try:
-            raw = _openrouter_text(key, model, visuals_prompt, max_tokens=1900)
+            raw = _provider_text(provider, model, key, visuals_prompt, max_tokens=1100)
             propuestas_parciales.append(_mensajes_parciales(raw))
             proposed = _parse_five_visuals(raw)
             visuals = validar_microfrases(proposed, narration['script'],
                                            narration['title'], narration['fact'], narration['lesson'])
-            visual_model = model
+            visual_model = f'{provider}:{model}'
             print(f'Cinco mensajes validados con {model}', flush=True)
             break
         except RuntimeError:
             raise
         except (ValueError, requests.RequestException, KeyError, TypeError) as exc:
-            last_problem = f'{model}: {str(exc)[:140]}'
-            print(f'OpenRouter etapa 2: {last_problem}', flush=True)
+            last_problem = f'{provider}/{model}: {str(exc)[:140]}'
+            if provider == 'openrouter' and 'cuota gratuita' in str(exc).lower():
+                providers_exhausted.add(provider)
+            print(f'IA etapa 2: {last_problem}', flush=True)
     if visuals is None:
         # Evitar fallar por una segunda llamada cuando el propio guion
         # contiene cinco proposiciones breves. Nunca inventar información.
@@ -862,7 +1021,7 @@ def create_ai_episode(ep):
         except ValueError as exc:
             raise RuntimeError(
                 'Narración válida, pero no se obtuvieron cinco mensajes seguros. '
-                f'OpenRouter: {last_problem}. Respaldo local: {exc}. '
+                f'IA: {last_problem}. Respaldo local: {exc}. '
                 'No se publicó nada.'
             ) from exc
 
@@ -875,8 +1034,9 @@ def create_ai_episode(ep):
         visual_ai_model=visual_model, generated_at=now(), verified=False,
         verification_note='Contenido generado con IA, no verificado independientemente',
     )
-    print(f"Guion OpenRouter creado: {ep['id']}; textos cortos: 5; fuentes propuestas: ninguna", flush=True)
+    print(f"Guion IA creado: {ep['id']}; textos cortos: 5; fuentes propuestas: ninguna", flush=True)
     return result
+
 
 def select_episode(episodes, gh=None, requested=None):
     """Selecciona un episodio pendiente con variedad de categorias y azar real.
@@ -1472,7 +1632,7 @@ def publish(ep, movie, cover, approval):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='DataViral: 500 ideas, IA OpenRouter Free y video Instagram')
+    ap = argparse.ArgumentParser(description='DataViral: 500 ideas, IA Groq/Gemini/OpenRouter y video Instagram')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--episode', default='', help='ID concreto; vacío = siguiente disponible')
     ap.add_argument('--out', default='output')
@@ -1498,7 +1658,7 @@ def main():
     out.mkdir(exist_ok=True,parents=True)
     (out/f"{ep['id']}-guion.json").write_text(
         json.dumps(generated,ensure_ascii=False,indent=2),encoding='utf-8')
-    print(f"Guion OpenRouter creado: {ep['id']}; referencias propuestas: {generated['source'] or 'ninguna'}")
+    print(f"Guion IA creado: {ep['id']}; referencias propuestas: {generated['source'] or 'ninguna'}")
     if args.publish and not generated.get('source'):
         print('AVISO: el guion no tiene fuentes; se permite publicar, pero no existe verificación independiente.', flush=True)
     movie,cover=render(generated,out,require_voice=args.publish)
