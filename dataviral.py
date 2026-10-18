@@ -943,13 +943,13 @@ def scene(ep, number, dest):
         r = rng.randrange(15, 145)
         d.ellipse((x-r, y-r, x+r, y+r), outline=(*accent, rng.randrange(22, 90)), width=rng.randrange(2, 8))
     d.rounded_rectangle((52, 72, 668, 152), 24, fill=(255, 255, 255, 18), outline=(*accent, 200), width=3)
-    d.text((77, 91), 'D A T A V I R A L', font=font(33, True), fill=(255, 255, 255))
+    d.text((77, 91), 'DATO_WOW', font=font(33, True), fill=(255, 255, 255))
     d.text((55, 187), ep['category'].upper(), font=font(19, True), fill=accent)
     # Zona segura central: sin párrafos de narración ni frases truncadas.
     titulares = microfrases(ep)
     texto_centrado_seguro(d, titulares[number], centro_y=610, ancho=560, max_lineas=3)
     d.line((58, 1128, 662, 1128), fill=accent, width=5)
-    d.text((92, 1154), 'DATO WOW  ·  20 SEGUNDOS', font=font(23, True), fill='white')
+    d.text((92, 1154), 'dato wow - conocimiento en 20 segundos', font=font(23, True), fill='white')
     img.save(dest, quality=92)
 
 
