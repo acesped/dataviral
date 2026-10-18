@@ -57,10 +57,11 @@
     },
     "DV-217": {
       "reel": "publicado",
-      "updated_at": "2026-10-18T21:50:29.006465+00:00",
+      "updated_at": "2026-10-18T21:50:29.970628+00:00",
       "share_to_feed": true,
       "reel_id": "18109044463919775",
-      "video_url": "https://raw.githubusercontent.com/acesped/dataviral/eb1a3c35891d90414287af7ed984553d34b2f814/datoviral_assets/media/DV-217-1914f36ffbb08bc4.mp4"
+      "video_url": "https://raw.githubusercontent.com/acesped/dataviral/eb1a3c35891d90414287af7ed984553d34b2f814/datoviral_assets/media/DV-217-1914f36ffbb08bc4.mp4",
+      "story": "enviando"
     }
   }
 }
