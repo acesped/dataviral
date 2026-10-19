@@ -93,11 +93,12 @@
     },
     "DV-483": {
       "reel": "publicado",
-      "updated_at": "2026-10-19T21:02:18.955666+00:00",
+      "updated_at": "2026-10-19T21:03:17.308457+00:00",
       "share_to_feed": true,
       "reel_id": "17894259558681601",
       "video_url": "https://raw.githubusercontent.com/acesped/dataviral/e8c8d7836f3faf667b6eee0fb978d343b97d0251/datoviral_assets/media/DV-483-38fdddc50be69b33.mp4",
-      "story": "enviando"
+      "story": "publicado",
+      "story_id": "17990900817093137"
     }
   }
 }
