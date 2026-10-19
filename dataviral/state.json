@@ -65,8 +65,11 @@
       "story_id": "18136384288632527"
     },
     "DV-468": {
-      "reel": "enviando",
-      "updated_at": "2026-10-19T03:01:11.792874+00:00"
+      "reel": "publicado",
+      "updated_at": "2026-10-19T03:01:50.240459+00:00",
+      "share_to_feed": true,
+      "reel_id": "18421473961154450",
+      "video_url": "https://raw.githubusercontent.com/acesped/dataviral/98322d496e26aaf1d0fe4d5c7fe21514c528d1c8/datoviral_assets/media/DV-468-2775a94e78d5c4a1.mp4"
     }
   }
 }
