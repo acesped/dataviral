@@ -959,8 +959,8 @@ PHOTO_STOP = {
     'algunos','tambien','también','unos','unas','sino','pero','cada',
     'todo','todos','ellas','ellos','del','las','los','con','una','que',
 }
-PHOTO_MIN_SCORE = int(os.getenv('DV_IMAGE_MIN_SCORE', '12'))
-PHOTO_MAX_QUERIES = int(os.getenv('DV_IMAGE_MAX_QUERIES', '4'))
+PHOTO_MIN_SCORE = int(os.getenv('DV_IMAGE_MIN_SCORE', '7'))
+PHOTO_MAX_QUERIES = int(os.getenv('DV_IMAGE_MAX_QUERIES', '6'))
 
 
 def _photo_words(value):
@@ -971,14 +971,30 @@ def _photo_words(value):
 
 
 def _photo_queries(ep):
-    """Prioriza un descriptor curado, el título concreto y su tema principal."""
+    """Consultas de lo específico a lo general, también en inglés si están curadas.
+
+    Los títulos largos en español suelen devolver cero archivos en Commons.
+    Evitar ampliar al tema genérico si existen palabras específicas.
+    """
     manual = str(ep.get('image_query') or '').strip()
     title = str(ep.get('title') or '').strip()
     terms = list(dict.fromkeys(_photo_words(title)))[:7]
     fact = list(dict.fromkeys(_photo_words(ep.get('fact') or ep.get('lesson'))))[:5]
     extra = [term for term in fact if term not in terms]
-    queries = [manual, title, ' '.join(terms), ' '.join(terms[:3] + extra[:3])]
-    return list(dict.fromkeys(q[:110] for q in queries if q.strip()))[:PHOTO_MAX_QUERIES]
+    category = str(ep.get('category') or '').lower()
+    hints = {
+        'ciencia': 'science nature', 'psicolog': 'brain neuroscience',
+        'tecnolog': 'technology device', 'historia': 'historical artifact',
+        'espacio': 'astronomy space', 'animal': 'animal wildlife',
+        'seguridad': 'safety',
+    }
+    hint = next((v for k, v in hints.items() if k in _photo_words(category) or k in category), '')
+    queries = [manual, title, ' '.join(terms[:5]),
+               ' '.join(terms[:3] + extra[:2]),
+               ' '.join(terms[:2] + hint.split()[:2]),
+               ' '.join(terms[:2])]
+    unique = list(dict.fromkeys(q[:110].strip() for q in queries if q.strip()))
+    return unique[:PHOTO_MAX_QUERIES]
 
 
 def _photo_get(url, *, params=None, stream=False):
@@ -1039,40 +1055,56 @@ def _openverse_photos(query):
 
 
 def _photo_score(item, ep, query_index):
+    """Prioriza coincidencias concretas sin rechazar por metadatos inocuos."""
     meta = ' '.join(str(item.get(x) or '') for x in ('title', 'description'))
     normalized = unicodedata.normalize('NFKD', meta.lower())
     normalized = ''.join(x for x in normalized if not unicodedata.combining(x))
-    if any(phrase in normalized for phrase in PHOTO_REJECT_METADATA):
+    if any(re.search(r'(?<![a-z])' + re.escape(term) + r'(?![a-z])', normalized)
+           for term in PHOTO_REJECT_METADATA):
         return -1
     words = set(_photo_words(meta))
     main = set(_photo_words(ep.get('title')))
+    manual = set(_photo_words(ep.get('image_query')))
     extra = set(_photo_words(ep.get('fact'))) | set(_photo_words(ep.get('lesson')))
-    # Un término temático obligatorio evita respaldos de 'ciencia' no relacionados.
-    hits = len(words & main)
+    # No basta una categoría general: tiene que coincidir al menos un concepto.
+    hits = len(words & (main | manual | extra))
     if hits == 0:
         return -1
-    return hits * 12 + len(words & extra) * 3 + max(0, 6 - query_index * 2)
+    return hits * 9 + len(words & main) * 5 + len(words & manual) * 6 + max(0, 8-query_index)
 
 
 def _photo_has_text(path):
-    """Detecta cualquier texto legible; si no hay OCR, rechaza la foto.
+    """OCR por palabras con confianza; evita falsos positivos de ruido visual.
 
-    Es conservador para priorizar legibilidad; el OCR no es perfecto,
-    por lo que una inspección humana sigue siendo necesaria para garantía absoluta.
+    Si falta Tesseract, rechaza conservadoramente. Ningún OCR garantiza
+    detectar toda letra o marca de agua: conviene inspección editorial.
     """
     exe = shutil.which('tesseract')
     if not exe:
-        print('Imagen rechazada: falta tesseract-ocr; fondo animado seguro', flush=True)
+        print('Fotografía omitida: instalar tesseract-ocr en el workflow', flush=True)
         return True
     try:
-        # Dos modos, para captar tanto palabras como fragmentos sueltos.
+        import csv
         for psm in ('11', '6'):
-            result = subprocess.run([exe, str(path), 'stdout', '--psm', psm],
-                                    capture_output=True, text=True, timeout=18, check=True)
-            found = re.findall(r'[\wÀ-ÿ]+', result.stdout, re.UNICODE)
-            if any(len(token) >= 2 for token in found) or len(found) >= 2:
+            res = subprocess.run([exe, str(path), 'stdout', '--psm', psm, 'tsv'],
+                                 capture_output=True, text=True, timeout=22, check=True)
+            rows = csv.DictReader(io.StringIO(res.stdout), delimiter='\t')
+            words = []
+            for row in rows:
+                token = (row.get('text') or '').strip()
+                try:
+                    confidence = float(row.get('conf', '-1'))
+                except ValueError:
+                    continue
+                letters = re.sub(r'[^A-Za-zÀ-ÿ0-9]', '', token)
+                # Alta confianza en palabra legible o número de varias cifras.
+                if confidence >= 65 and len(letters) >= 3:
+                    words.append(letters)
+            if words:
+                print('Fotografía rechazada: OCR detectó texto legible', flush=True)
                 return True
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, ValueError):
+        print('Fotografía rechazada: OCR no pudo verificarse', flush=True)
         return True
     return False
 
@@ -1084,7 +1116,8 @@ def _download_photo(url, target):
         'upload.wikimedia.org', 'commons.wikimedia.org',
         'images.openverse.org', 'live.staticflickr.com',
         'farm66.staticflickr.com', 'farm1.staticflickr.com',
-        'images.unsplash.com', 'cdn.pixabay.com', 'www.publicdomainpictures.net'
+        'images.unsplash.com', 'cdn.pixabay.com', 'www.publicdomainpictures.net',
+        'images.pexels.com', 'staticflickr.com', 'upload.wikimedia.org'
     ):
         # No acceder a hosts arbitrarios desde un workflow con secretos.
         return False
@@ -1131,10 +1164,11 @@ def prepare_photo(ep, folder):
             except (requests.RequestException, ValueError, KeyError) as exc:
                 print(f'Proveedor imagen {provider.__name__}: {type(exc).__name__}', flush=True)
     candidates.sort(key=lambda x: x[0], reverse=True)
+    print(f'Imágenes: {len(candidates)} candidatas temáticas tras metadatos; consultas={len(queries)}', flush=True)
     chosen = folder / 'foto_principal.jpg'
     chosen.unlink(missing_ok=True)
     credits = []
-    for score, item in candidates[:15]:
+    for score, item in candidates[:30]:
         if _download_photo(item['url'], chosen):
             credits = [dict(item, relevance_score=score, text_check='tesseract_no_text_detected')]
             break
@@ -1143,7 +1177,7 @@ def prepare_photo(ep, folder):
     if credits:
         print(f"Fotografía única: {credits[0]['title'][:90]} ({credits[0]['provider']})", flush=True)
         return chosen, credits
-    print('Sin fotografía pertinente y libre de texto: fondo animado de respaldo', flush=True)
+    print('Sin fotografía aceptable: revisar avisos de fuentes, OCR y descargas; fondo animado', flush=True)
     return None, []
 
 
@@ -1153,7 +1187,7 @@ def scene(ep, number, dest, photo=None):
     if photo is not None:
         with Image.open(photo) as source:
             img = ImageOps.fit(source.convert('RGB'), (W, H), method=Image.Resampling.LANCZOS)
-        img = ImageEnhance.Brightness(img).enhance(.50)
+        img = ImageEnhance.Brightness(img).enhance(.63)
     else:
         img = Image.new('RGB', (W, H), bg)
     d = ImageDraw.Draw(img, 'RGBA')
