@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DataViral: catálogo integrado (500 propuestas), previews y publicación de VIDEO en Reels, feed y Stories de IG.
+"""DataViral: catálogo integrado (500 propuestas), previews y publicación de VIDEO en Reels y feed de IG.
 
 Las referencias son opcionales; la ausencia de fuentes no impide publicar.
 Los datos generados por IA no están verificados independientemente.
@@ -695,240 +695,43 @@ def _parse_five_visuals(raw):
     return [found[i] for i in range(1,6)]
 
 
-def _proposiciones_breves(texto):
-    """Extrae proposiciones literales completas; jamás trunca por caracteres.
-
-    Se separan oraciones y cláusulas explícitas. Un fragmento solamente sirve
-    si satisface todas las reglas del validador final.
-    """
-    texto = re.sub(r'\s+', ' ', str(texto or '')).strip()
-    for frase in re.split(r'(?<=[.!?;])\s+|\s*[;:]\s*', texto):
-        for parte in re.split(r',\s+(?=(?:pero|aunque|además|sin embargo|por eso|mientras)\b)', frase, flags=re.I):
-            parte = parte.strip(' \t\n.,;:¡!¿?"“”')
-            parte = re.sub(r'^(?:pero|aunque|además|sin embargo|por eso),?\s+', '', parte, flags=re.I)
-            if parte and VISUAL_MIN_WORDS <= len(parte.split()) <= VISUAL_MAX_WORDS and len(parte) <= VISUAL_MAX_CHARS:
-                yield parte
-
-
-def _mensajes_parciales(raw):
-    """Conserva líneas de mensajes aun si faltan campos o JSON se truncó."""
-    resultados = []
-    try:
-        parsed = _parse_five_visuals(raw)
-        if isinstance(parsed, list):
-            return [x for x in parsed if isinstance(x, str)]
-    except (ValueError, TypeError, KeyError):
-        pass
-    for linea in str(raw or '').splitlines():
-        m = re.match(r'^\s*(?:MENSAJE[_ ]?|ESCENA[_ ]?|[-*]\s*)\s*([1-5])\s*[.):-]\s*(.+?)\s*$', linea, re.I)
-        if m:
-            resultados.append(m.group(2).strip().strip('"“”'))
-    return resultados
-
-
-def _recuperar_mensajes(narracion, respuestas=()):
-    """Acumula frases válidas de TODOS los modelos y del propio guion.
-
-    No se descarta una respuesta entera por una sola escena defectuosa.
-    Respeta el orden aproximado del guion y conserva diversidad de mensajes.
-    """
-    vistos = set()
-    candidatos = []
-    universo = _palabras_relevantes(' '.join(str(narracion[k]) for k in ('script','title','fact','lesson')))
-
-    def agregar(frase):
-        if not isinstance(frase, str):
-            return
-        frase = re.sub(r'\s+', ' ', frase).strip().strip('"“”')
-        clave = _visual_normalizado(frase).strip(' .!?¿¡')
-        if not clave or clave in vistos:
-            return
-        if not VISUAL_MIN_WORDS <= len(frase.split()) <= VISUAL_MAX_WORDS:
-            return
-        if len(frase) > VISUAL_MAX_CHARS or frase.endswith(('...', '…', ':', ',', ';')):
-            return
-        if any(generic in clave for generic in GENERIC_VISUALS):
-            return
-        if not (_palabras_relevantes(frase) & universo):
-            return
-        vistos.add(clave)
-        candidatos.append(frase)
-
-    # Primero, material válido propuesto por los modelos aunque otra escena falle.
-    for respuesta in respuestas:
-        if isinstance(respuesta, list):
-            for frase in respuesta:
-                agregar(frase)
-                if isinstance(frase, str):
-                    for breve in _proposiciones_breves(frase):
-                        agregar(breve)
-    # Después, proposiciones literales del guion y sus afirmaciones asociadas.
-    for campo in ('script', 'fact', 'lesson'):
-        for breve in _proposiciones_breves(narracion[campo]):
-            agregar(breve)
-
-    if len(candidatos) < 5:
-        raise ValueError(f'solo se recuperaron {len(candidatos)} mensajes válidos distintos (se requieren 5)')
-    return validar_microfrases(candidatos[:5], narracion['script'],
-                               narracion['title'], narracion['fact'], narracion['lesson'])
-
-
 def _mensajes_locales_desde_guion(narration):
-    """Respaldo extractivo, sin introducir afirmaciones que no estén en guion."""
-    return _recuperar_mensajes(narration)
+    """Respaldo extractivo: frases del guion, nunca hechos inventados.
 
-
-# Orden de proveedores configurable, sin nuevas dependencias.
-# Las cuentas gratuitas están sujetas a cuotas propias; no se garantiza cuota infinita.
-GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
-GEMINI_API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models/'
-
-
-def _provider_credentials():
-    providers = []
-    for name, secret in (('groq', 'GROQ_API_KEY'), ('gemini', 'GEMINI_API_KEY'),
-                         ('openrouter', 'OPENROUTER_API_KEY')):
-        key = os.getenv(secret, '').strip()
-        if key:
-            providers.append((name, key))
-    if not providers:
-        raise RuntimeError('Configura al menos una clave: GROQ_API_KEY, GEMINI_API_KEY u OPENROUTER_API_KEY')
-    return providers
-
-
-def _discover_groq_models(key):
-    """Consulta el catálogo accesible para esta API key, sin suponer IDs vigentes."""
-    preferred = ('openai/gpt-oss-20b', 'openai/gpt-oss-120b',
-                 'llama-3.3-70b-versatile', 'llama-3.1-8b-instant')
-    response = requests.get('https://api.groq.com/openai/v1/models',
-                            headers={'Authorization': f'Bearer {key}'}, timeout=25)
-    response.raise_for_status()
-    available = {row.get('id') for row in response.json().get('data', [])
-                 if isinstance(row, dict) and isinstance(row.get('id'), str)}
-    chosen = os.getenv('GROQ_MODEL', '').strip()
-    # Only general text generation models: avoid audio, guard, vision, or tooling.
-    allowed = [mid for mid in preferred if mid in available]
-    if chosen and chosen in available and chosen not in allowed:
-        allowed.insert(0, chosen)
-    elif chosen in allowed:
-        allowed.remove(chosen)
-        allowed.insert(0, chosen)
-    return allowed[:3]
-
-
-def _discover_gemini_models(key):
-    """Lista modelos con generateContent y prioriza Flash-Lite (no TTS/imágenes)."""
-    preferred = ('gemini-3.1-flash-lite', 'gemini-3.5-flash-lite',
-                 'gemini-3.6-flash', 'gemini-3.8-flash')
-    found = set()
-    page = None
-    for _ in range(5):
-        params = {'pageSize': 100}
-        if page:
-            params['pageToken'] = page
-        response = requests.get('https://generativelanguage.googleapis.com/v1beta/models',
-                                headers={'x-goog-api-key': key}, params=params, timeout=25)
-        response.raise_for_status()
-        payload = response.json()
-        for row in payload.get('models', []):
-            if 'generateContent' in row.get('supportedGenerationMethods', []):
-                name = str(row.get('name', '')).removeprefix('models/')
-                if name:
-                    found.add(name)
-        page = payload.get('nextPageToken')
-        if not page:
-            break
-    chosen = os.getenv('GEMINI_MODEL', '').strip().removeprefix('models/')
-    allowed = [mid for mid in preferred if mid in found]
-    if chosen and chosen in found and chosen not in allowed:
-        allowed.insert(0, chosen)
-    elif chosen in allowed:
-        allowed.remove(chosen)
-        allowed.insert(0, chosen)
-    return allowed[:3]
-
-
-def _ai_candidates():
-    result = []
-    for provider, key in _provider_credentials():
-        if provider == 'groq':
-            try:
-                models = _discover_groq_models(key)
-                result.extend((provider, model, key) for model in models)
-                if not models:
-                    print('Groq: sin modelos de texto compatibles accesibles con esta clave', flush=True)
-            except (requests.RequestException, ValueError, KeyError) as exc:
-                print(f'Groq: no se pudo consultar catálogo: {str(exc)[:160]}', flush=True)
-        elif provider == 'gemini':
-            try:
-                models = _discover_gemini_models(key)
-                result.extend((provider, model, key) for model in models)
-                if not models:
-                    print('Gemini: sin modelos Flash compatibles accesibles con esta clave', flush=True)
-            except (requests.RequestException, ValueError, KeyError) as exc:
-                print(f'Gemini: no se pudo consultar catálogo: {str(exc)[:160]}', flush=True)
-        else:
-            try:
-                result.extend((provider, model, key) for model, _ in select_free_json_models(key, 5))
-            except (requests.RequestException, ValueError, RuntimeError) as exc:
-                print(f'OpenRouter: no se pudieron listar modelos gratuitos: {exc}', flush=True)
-    if not result:
-        raise RuntimeError('Ningún proveedor ofrece modelos compatibles accesibles; revisa las claves y las cuotas.')
-    return result
-
-
-def _response_visible_text(response, provider):
-    if response.status_code in (401, 403):
-        raise ValueError(f'{provider}: clave o acceso rechazado (HTTP {response.status_code})')
-    if response.status_code == 429:
-        raise ValueError(f'{provider}: cuota o límite temporal (HTTP 429)')
-    if not response.ok:
-        raise ValueError(f'{provider}: HTTP {response.status_code}: {response.text[:200]}')
-    data = response.json()
-    if provider == 'gemini':
-        choices = data.get('candidates') or []
-        pieces = (choices[0].get('content') or {}).get('parts') or [] if choices else []
-        output = ''.join(part.get('text','') for part in pieces if isinstance(part, dict))
-    else:
-        choices = data.get('choices') or []
-        content = (choices[0].get('message') or {}).get('content', '') if choices else ''
-        output = (''.join(x.get('text','') for x in content if isinstance(x,dict))
-                  if isinstance(content,list) else content)
-    if not isinstance(output,str) or not output.strip():
-        raise ValueError(f'{provider}: respuesta sin texto visible')
-    return output.strip()
-
-
-def _provider_text(provider, model, key, prompt, *, max_tokens=1500):
-    if provider == 'openrouter':
+    Utiliza solamente oraciones o proposiciones completas tal como aparecen
+    en la narración. Si el guion no contiene cinco ideas autosuficientes y
+    legibles, falla de forma segura en lugar de fabricar afirmaciones.
+    """
+    script = narration['script']
+    # Separar únicamente por puntuación fuerte y conectores que mantienen
+    # una proposición independiente. Evitamos cortar por número de palabras.
+    sentences = re.split(r'(?<=[.!?;])\s+|(?<=;)\s*', script)
+    candidates = []
+    for sentence in sentences:
+        sentence = sentence.strip(' \t\n.,;:¡!¿?')
+        if not sentence:
+            continue
+        parts = re.split(r'\s*[;:]\s*|,\s+(?=(?:pero|aunque|sin embargo|por eso|además)\b)', sentence, flags=re.I)
+        for part in parts:
+            part = part.strip(' \t\n.,;:¡!¿?')
+            # Eliminar conectores iniciales solo cuando queda una oración
+            # con verbo; no reconstruir ni parafrasear el contenido.
+            part = re.sub(r'^(?:pero|aunque|sin embargo|además|por eso),?\s+', '', part, flags=re.I)
+            if part and 3 <= len(part.split()) <= VISUAL_MAX_WORDS and len(part) <= VISUAL_MAX_CHARS:
+                candidates.append(part)
+    valid = []
+    for candidate in candidates:
         try:
-            return _openrouter_text(key, model, prompt, max_tokens=max_tokens)
-        except RuntimeError as exc:
-            # Agotamiento de cuota: registrar el fallo, no abortar los otros proveedores.
-            if 'cuota gratuita' in str(exc).lower():
-                raise ValueError(str(exc)) from exc
-            raise
-    if provider == 'groq':
-        response = requests.post(
-            GROQ_URL,
-            headers={'Authorization': f'Bearer {key}', 'Content-Type':'application/json'},
-            json={'model':model, 'messages':[
-                {'role':'system', 'content':'Responde exclusivamente en español y con el formato pedido.'},
-                {'role':'user','content':prompt}],
-                'temperature':0.2, 'max_tokens':min(max_tokens, 2048)},
-            timeout=110)
-        return _response_visible_text(response, provider)
-    if provider == 'gemini':
-        response = requests.post(
-            GEMINI_API_ROOT + urllib.parse.quote(model, safe='') + ':generateContent',
-            headers={'x-goog-api-key':key,'Content-Type':'application/json'},
-            json={'contents':[{'parts':[{'text':prompt}]}],
-                  'generationConfig':{'maxOutputTokens':min(max_tokens,2048)}},
-            timeout=110)
-        return _response_visible_text(response, provider)
-    raise ValueError(f'Proveedor desconocido: {provider}')
-
-
+            validar_microfrases([candidate] * 5, script, narration['title'], narration['fact'], narration['lesson'])
+        except ValueError as exc:
+            if 'texto repetido' not in str(exc):
+                continue
+        valid.append(candidate)
+    # No replicar mensajes para completar cinco escenas.
+    unique = list(dict.fromkeys(valid))
+    if len(unique) < 5:
+        raise ValueError(f'el guion solo contiene {len(unique)} frases breves extraíbles (requiere 5)')
+    return validar_microfrases(unique[:5], script, narration['title'], narration['fact'], narration['lesson'])
 
 
 def create_ai_episode(ep):
@@ -937,8 +740,9 @@ def create_ai_episode(ep):
     Evita pedir un gran JSON. Solo usa modelos con prompt/completion gratuitos;
     si alguno falla por saturación o salida truncada prueba el siguiente.
     """
-    candidates = _ai_candidates()
-    print('Proveedores disponibles: ' + ', '.join(f'{provider}:{model}' for provider, model, _ in candidates), flush=True)
+    key = credential('OPENROUTER_API_KEY', TEST_OPENROUTER_API_KEY)
+    candidates = select_free_json_models(key, 7)
+    print('Modelos gratuitos disponibles: ' + ', '.join(mid for mid, _ in candidates), flush=True)
     intro = (
         f"Tema: {str(ep.get('title', ''))[:140]}. "
         f"Categoría: {str(ep.get('category', ''))[:70]}. "
@@ -955,25 +759,20 @@ def create_ai_episode(ep):
     narration = None
     narration_model = None
     last_problem = 'sin respuesta'
-    providers_exhausted = set()
-    for provider, model, key in candidates:
-        if provider in providers_exhausted:
-            continue
+    for model, _ in candidates:
         try:
-            raw = _provider_text(provider, model, key, narration_prompt, max_tokens=1500)
+            raw = _openrouter_text(key, model, narration_prompt, max_tokens=2800)
             narration = _parse_narration(raw)
-            narration_model = f'{provider}:{model}'
-            print(f'Narración validada con {narration_model}', flush=True)
+            narration_model = model
+            print(f'Narración validada con {model}', flush=True)
             break
         except RuntimeError:
             raise
         except (ValueError, requests.RequestException, KeyError, TypeError) as exc:
-            last_problem = f'{provider}/{model}: {str(exc)[:140]}'
-            if provider == 'openrouter' and 'cuota gratuita' in str(exc).lower():
-                providers_exhausted.add(provider)
-            print(f'IA etapa 1: {last_problem}', flush=True)
+            last_problem = f'{model}: {str(exc)[:140]}'
+            print(f'OpenRouter etapa 1: {last_problem}', flush=True)
     if narration is None:
-        raise RuntimeError('Ningún proveedor configurado generó narración válida. '
+        raise RuntimeError('Ningún modelo gratuito generó narración válida. '
                            f'Último diagnóstico: {last_problem}. No se publicó nada.')
 
     # No volver a generar el guion cuando fallan los mensajes visuales.
@@ -989,39 +788,35 @@ def create_ai_episode(ep):
     )
     visuals = None
     visual_model = None
-    propuestas_parciales = []
     # Antes de otra solicitud, no hay parámetro costoso de razonamiento forzado:
     # muchos proveedores gratuitos no lo admiten; los prompts cortos reducen consumo.
     # El modelo que completó bien la narración recibe la primera oportunidad.
-    visual_candidates = sorted(candidates, key=lambda row: f'{row[0]}:{row[1]}' != narration_model)
-    for provider, model, key in visual_candidates:
+    visual_candidates = sorted(candidates, key=lambda row: row[0] != narration_model)
+    for model, _ in visual_candidates:
         try:
-            raw = _provider_text(provider, model, key, visuals_prompt, max_tokens=1100)
-            propuestas_parciales.append(_mensajes_parciales(raw))
+            raw = _openrouter_text(key, model, visuals_prompt, max_tokens=1900)
             proposed = _parse_five_visuals(raw)
             visuals = validar_microfrases(proposed, narration['script'],
                                            narration['title'], narration['fact'], narration['lesson'])
-            visual_model = f'{provider}:{model}'
+            visual_model = model
             print(f'Cinco mensajes validados con {model}', flush=True)
             break
         except RuntimeError:
             raise
         except (ValueError, requests.RequestException, KeyError, TypeError) as exc:
-            last_problem = f'{provider}/{model}: {str(exc)[:140]}'
-            if provider == 'openrouter' and 'cuota gratuita' in str(exc).lower():
-                providers_exhausted.add(provider)
-            print(f'IA etapa 2: {last_problem}', flush=True)
+            last_problem = f'{model}: {str(exc)[:140]}'
+            print(f'OpenRouter etapa 2: {last_problem}', flush=True)
     if visuals is None:
         # Evitar fallar por una segunda llamada cuando el propio guion
         # contiene cinco proposiciones breves. Nunca inventar información.
         try:
-            visuals = _recuperar_mensajes(narration, propuestas_parciales)
-            visual_model = 'recuperacion-local'
-            print('Cinco mensajes recuperados de propuestas parciales y del guion', flush=True)
+            visuals = _mensajes_locales_desde_guion(narration)
+            visual_model = 'extractivo-local'
+            print('Cinco mensajes recuperados literalmente del guion (sin IA adicional)', flush=True)
         except ValueError as exc:
             raise RuntimeError(
                 'Narración válida, pero no se obtuvieron cinco mensajes seguros. '
-                f'IA: {last_problem}. Respaldo local: {exc}. '
+                f'OpenRouter: {last_problem}. Respaldo local: {exc}. '
                 'No se publicó nada.'
             ) from exc
 
@@ -1034,9 +829,8 @@ def create_ai_episode(ep):
         visual_ai_model=visual_model, generated_at=now(), verified=False,
         verification_note='Contenido generado con IA, no verificado independientemente',
     )
-    print(f"Guion IA creado: {ep['id']}; textos cortos: 5; fuentes propuestas: ninguna", flush=True)
+    print(f"Guion OpenRouter creado: {ep['id']}; textos cortos: 5; fuentes propuestas: ninguna", flush=True)
     return result
-
 
 def select_episode(episodes, gh=None, requested=None):
     """Selecciona un episodio pendiente con variedad de categorias y azar real.
@@ -1069,7 +863,7 @@ def select_episode(episodes, gh=None, requested=None):
         row = states.get(ep['id'], {})
         if not isinstance(row, dict):
             raise RuntimeError('Registro de estado invalido para ' + ep['id'])
-        statuses = [row.get(field) for field in ('reel', 'foto', 'feed_video')]
+        statuses = [row.get(field) for field in ('reel', 'foto', 'feed_video', 'story')]
         if any(status in blocked for status in statuses):
             if 'publicado' in statuses:
                 published_counts[category] = published_counts.get(category, 0) + 1
@@ -1138,167 +932,230 @@ def palette(i):
     ][i % 5]
 
 
-# Solo fotografías CC0 o de dominio público: no precisan atribución obligatoria.
-# Se conserva la procedencia en creditos_imagenes.json para trazabilidad.
-IMAGE_LICENSES = {'cc0', 'pdm'}
-IMAGE_HEADERS = {
-    'User-Agent': 'DatoWowEducationalBot/1.2 (https://github.com/acesped/dataviral; contact via GitHub issues)',
-    'Accept': 'application/json, image/jpeg, image/png, image/webp, */*;q=0.5',
+# Fotografía única: solo CC0 o dominio público y sin texto visible.
+# Para aceptar fotografías, el runner requiere Tesseract OCR:
+# sudo apt-get install -y tesseract-ocr
+# Si no está disponible, se emplea un fondo animado sin imagen externa.
+import shutil
+import unicodedata
+from PIL import ImageOps, ImageEnhance, ImageFilter
+
+PHOTO_HEADERS = {
+    'User-Agent': 'DatoWowEducationalBot/1.4 (https://github.com/acesped/dataviral)',
+    'Accept': 'application/json, image/jpeg, image/png, image/webp',
 }
+PHOTO_REJECT_METADATA = (
+    'poster', 'infographic', 'infografia', 'diagram', 'diagrama',
+    'chart', 'grafic', 'screenshot', 'captura', 'meme', 'banner',
+    'advertisement', 'publicidad', 'logo', 'watermark', 'marca de agua',
+    'typography', 'tipografia', 'text overlay', 'book cover',
+    'portada', 'signage', 'letrero', 'labelled', 'labeled',
+    'etiquetad', 'newspaper', 'periódico', 'periodico', 'mapa politico',
+)
+PHOTO_STOP = {
+    'esto','esta','este','para','porque','como','cuando','desde','sobre','entre',
+    'donde','tiene','puede','pueden','muchos','nuestra','nuestro','datos',
+    'dato','sabias','sabías','están','estan','segun','según','algunas',
+    'algunos','tambien','también','unos','unas','sino','pero','cada',
+    'todo','todos','ellas','ellos','del','las','los','con','una','que',
+}
+PHOTO_MIN_SCORE = int(os.getenv('DV_IMAGE_MIN_SCORE', '12'))
+PHOTO_MAX_QUERIES = int(os.getenv('DV_IMAGE_MAX_QUERIES', '4'))
 
 
-def _image_request(url, *, params=None, stream=False, timeout=20):
-    """Segundo intento moderado para límites transitorios; sin bucles agresivos."""
-    for attempt in range(2):
-        r = requests.get(url, params=params, headers=IMAGE_HEADERS, timeout=timeout, stream=stream)
-        if r.status_code in (429, 502, 503, 504) and attempt == 0:
-            r.close()
+def _photo_words(value):
+    value = unicodedata.normalize('NFKD', str(value or '').lower())
+    value = ''.join(x for x in value if not unicodedata.combining(x))
+    return [x for x in re.findall(r'[a-z0-9]{4,}', value)
+            if x not in PHOTO_STOP]
+
+
+def _photo_queries(ep):
+    """Prioriza un descriptor curado, el título concreto y su tema principal."""
+    manual = str(ep.get('image_query') or '').strip()
+    title = str(ep.get('title') or '').strip()
+    terms = list(dict.fromkeys(_photo_words(title)))[:7]
+    fact = list(dict.fromkeys(_photo_words(ep.get('fact') or ep.get('lesson'))))[:5]
+    extra = [term for term in fact if term not in terms]
+    queries = [manual, title, ' '.join(terms), ' '.join(terms[:3] + extra[:3])]
+    return list(dict.fromkeys(q[:110] for q in queries if q.strip()))[:PHOTO_MAX_QUERIES]
+
+
+def _photo_get(url, *, params=None, stream=False):
+    for retry in range(2):
+        response = requests.get(url, params=params, headers=PHOTO_HEADERS,
+                                timeout=(10, 22), stream=stream)
+        if response.status_code in (429, 502, 503, 504) and retry == 0:
+            response.close()
             time.sleep(2)
             continue
-        r.raise_for_status()
-        return r
-    raise RuntimeError('Servicio de imágenes no disponible')
+        response.raise_for_status()
+        return response
+    raise RuntimeError('Proveedor de imágenes sin respuesta')
 
 
-def _safe_photo_download(url, target):
-    from urllib.parse import urlparse
-    parsed = urlparse(url)
-    # Rechazar enlaces inseguros y direcciones internas; solo proveedores públicos conocidos.
-    host = (parsed.hostname or '').lower()
-    if parsed.scheme != 'https' or not host or host in ('localhost',) or host.endswith('.local'):
-        return False
-    try:
-        with _image_request(url, stream=True, timeout=22) as r:
-            kind = r.headers.get('Content-Type', '').lower()
-            if not any(t in kind for t in ('image/jpeg', 'image/png', 'image/webp')):
-                return False
-            payload = bytearray()
-            for chunk in r.iter_content(65536):
-                if chunk:
-                    payload.extend(chunk)
-                if len(payload) > 10_000_000:
-                    return False
-        from PIL import ImageOps
-        with Image.open(io.BytesIO(payload)) as img:
-            img = ImageOps.exif_transpose(img)
-            if img.width < 420 or img.height < 300:
-                return False
-            img.convert('RGB').save(target, 'JPEG', quality=86)
-        return True
-    except Exception as exc:
-        print(f'Imagen descartada: {type(exc).__name__}: {str(exc)[:150]}', flush=True)
-        return False
+def _photo_html(value):
+    import html as _html
+    return _html.unescape(re.sub(r'<[^>]*>', ' ', str(value or '')))
 
 
-def _strip_html(value):
-    return re.sub(r'<[^>]*>', '', str(value or '')).strip()
-
-
-def _commons_candidates(query):
-    params = {'action':'query', 'format':'json', 'generator':'search',
-              'gsrsearch':'filetype:bitmap ' + query, 'gsrnamespace':6,
-              'gsrlimit':18, 'prop':'imageinfo', 'iiprop':'url|extmetadata',
-              'iiurlwidth':900}
-    with _image_request('https://commons.wikimedia.org/w/api.php', params=params) as r:
-        pages = r.json().get('query', {}).get('pages', {})
+def _commons_photos(query):
+    params = dict(action='query', format='json', generator='search',
+                  gsrsearch='filetype:bitmap ' + query, gsrnamespace=6,
+                  gsrlimit=16, prop='imageinfo', iiprop='url|extmetadata',
+                  iiurlwidth=1000)
+    with _photo_get('https://commons.wikimedia.org/w/api.php', params=params) as response:
+        pages = (response.json().get('query') or {}).get('pages') or {}
     for page in pages.values():
         info = (page.get('imageinfo') or [{}])[0]
-        meta = info.get('extmetadata') or {}
-        lic = _strip_html((meta.get('LicenseShortName') or {}).get('value','')).lower().replace(' ','')
-        free_of_attribution = ('cc0' in lic or 'publicdomain' in lic or
-                               lic in ('pd','pdm','dominiopúblico','dominiopublico') or
-                               lic.startswith('pd-'))
-        if not free_of_attribution or any(x in lic for x in ('cc-by','-nc','-nd')):
+        metadata = info.get('extmetadata') or {}
+        license_name = _photo_html((metadata.get('LicenseShortName') or {}).get('value')).lower().replace(' ', '')
+        # Evitar material CC-BY/SA: elegir exclusivamente CC0 o PD marcadas.
+        permitted = ('cc0' in license_name or 'publicdomain' in license_name
+                     or license_name in ('pd', 'pdm') or license_name.startswith('pd-'))
+        if not permitted or any(x in license_name for x in ('cc-by', '-nc', '-nd')):
             continue
         url = info.get('thumburl') or info.get('url')
         if url:
-            yield {'url':url, 'title':page.get('title',''),
-                   'author':_strip_html((meta.get('Artist') or {}).get('value','')),
-                   'license':lic, 'source':info.get('descriptionurl','')}
+            yield dict(url=url, title=page.get('title', ''),
+                       description=_photo_html((metadata.get('ImageDescription') or {}).get('value'))[:400],
+                       source=info.get('descriptionurl', ''), license=license_name,
+                       provider='Wikimedia Commons')
 
 
-def _openverse_candidates(query):
-    with _image_request('https://api.openverse.org/v1/images/',
-                        params={'q':query, 'license':'cc0,pdm', 'page_size':20}, timeout=20) as r:
-        items = r.json().get('results', [])
-    for item in items:
-        lic = str(item.get('license') or '').lower()
-        if lic not in IMAGE_LICENSES:
+def _openverse_photos(query):
+    with _photo_get('https://api.openverse.org/v1/images/',
+                    params=dict(q=query, license='cc0,pdm', page_size=16)) as response:
+        results = response.json().get('results') or []
+    for item in results:
+        if str(item.get('license') or '').lower() not in ('cc0', 'pdm'):
             continue
         url = item.get('url') or item.get('thumbnail')
         if url:
-            yield {'url':url, 'title':item.get('title',''), 'author':item.get('creator',''),
-                   'license':lic, 'source':item.get('foreign_landing_url','')}
+            yield dict(url=url, title=item.get('title') or '',
+                       description=item.get('description') or '',
+                       source=item.get('foreign_landing_url') or '',
+                       license=item.get('license'), provider='Openverse')
 
 
-def _image_queries(ep):
-    """Búsquedas de fotografías sobre el contenido real, con alternativas temáticas.
+def _photo_score(item, ep, query_index):
+    meta = ' '.join(str(item.get(x) or '') for x in ('title', 'description'))
+    normalized = unicodedata.normalize('NFKD', meta.lower())
+    normalized = ''.join(x for x in normalized if not unicodedata.combining(x))
+    if any(phrase in normalized for phrase in PHOTO_REJECT_METADATA):
+        return -1
+    words = set(_photo_words(meta))
+    main = set(_photo_words(ep.get('title')))
+    extra = set(_photo_words(ep.get('fact'))) | set(_photo_words(ep.get('lesson')))
+    # Un término temático obligatorio evita respaldos de 'ciencia' no relacionados.
+    hits = len(words & main)
+    if hits == 0:
+        return -1
+    return hits * 12 + len(words & extra) * 3 + max(0, 6 - query_index * 2)
 
-    Evita representar como exactos dispositivos/modelos que no estén verificados.
+
+def _photo_has_text(path):
+    """Detecta cualquier texto legible; si no hay OCR, rechaza la foto.
+
+    Es conservador para priorizar legibilidad; el OCR no es perfecto,
+    por lo que una inspección humana sigue siendo necesaria para garantía absoluta.
     """
-    original = re.sub(r'\s+', ' ', str(ep.get('image_query') or ep.get('title') or '')).strip()[:110]
-    category = str(ep.get('category', '')).lower()
-    general = {
-        'psicología': 'human brain neuroscience psychology',
-        'ciencia': 'nature science research biology',
-        'tecnología': 'technology computer electronics engineering',
-        'historia': 'historic museum history artifacts',
-        'seguridad': 'everyday safety public education',
-    }
-    fallback = next((v for k, v in general.items() if k in category), 'science educational photography')
-    # Empezar por el tema exacto; añadir alternativas más amplias si no hay fotos.
-    queries = [original, (original + ' science illustration') if original else '', fallback]
-    return [q for i, q in enumerate(queries) if q and q not in queries[:i]], []
+    exe = shutil.which('tesseract')
+    if not exe:
+        print('Imagen rechazada: falta tesseract-ocr; fondo animado seguro', flush=True)
+        return True
+    try:
+        # Dos modos, para captar tanto palabras como fragmentos sueltos.
+        for psm in ('11', '6'):
+            result = subprocess.run([exe, str(path), 'stdout', '--psm', psm],
+                                    capture_output=True, text=True, timeout=18, check=True)
+            found = re.findall(r'[\wÀ-ÿ]+', result.stdout, re.UNICODE)
+            if any(len(token) >= 2 for token in found) or len(found) >= 2:
+                return True
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return False
 
 
-def prepare_photos(ep, folder):
-    """Busca hasta 5 fotografías CC0/PD, con trazabilidad y respaldo animado."""
-    queries, models = _image_queries(ep)
-    photos, credits, used = [], [], set()
-    print(f'Imágenes: consultas={queries!r} (solo CC0/dominio público)', flush=True)
-    for query in queries:
-        if len(photos) == 5:
-            break
-        for backend in (_commons_candidates, _openverse_candidates):
-            if len(photos) == 5:
-                break
+def _download_photo(url, target):
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme != 'https' or parsed.hostname not in (
+        'upload.wikimedia.org', 'commons.wikimedia.org',
+        'images.openverse.org', 'live.staticflickr.com',
+        'farm66.staticflickr.com', 'farm1.staticflickr.com',
+        'images.unsplash.com', 'cdn.pixabay.com', 'www.publicdomainpictures.net'
+    ):
+        # No acceder a hosts arbitrarios desde un workflow con secretos.
+        return False
+    try:
+        with _photo_get(url, stream=True) as response:
+            if not any(t in response.headers.get('Content-Type', '').lower()
+                       for t in ('image/jpeg', 'image/png', 'image/webp')):
+                return False
+            raw = bytearray()
+            for chunk in response.iter_content(65536):
+                raw.extend(chunk)
+                if len(raw) > 10_000_000:
+                    return False
+        with Image.open(io.BytesIO(raw)) as original:
+            if original.width < 600 or original.height < 480:
+                return False
+            original = ImageOps.exif_transpose(original).convert('RGB')
+            original.thumbnail((1500, 1500))
+            original.save(target, 'JPEG', quality=88)
+        if _photo_has_text(target):
+            target.unlink(missing_ok=True)
+            return False
+        return True
+    except Exception as exc:
+        print(f'Imagen no apta: {type(exc).__name__}: {str(exc)[:100]}', flush=True)
+        target.unlink(missing_ok=True)
+        return False
+
+
+def prepare_photo(ep, folder):
+    """Exactamente cero o una imagen para todo el video."""
+    queries = _photo_queries(ep)
+    candidates, seen = [], set()
+    for qindex, query in enumerate(queries):
+        for provider in (_commons_photos, _openverse_photos):
             try:
-                candidates = list(backend(query))
-                print(f'Imágenes: {backend.__name__} encontró {len(candidates)} candidatas para {query!r}', flush=True)
-                for candidate in candidates:
-                    if len(photos) == 5:
-                        break
-                    url = candidate['url']
-                    if url in used:
+                for item in provider(query):
+                    if item['url'] in seen:
                         continue
-                    used.add(url)
-                    title = (str(candidate.get('title',''))+' '+str(candidate.get('source',''))).lower()
-                    if models and not all(x.lower().replace(' ','') in title.replace(' ','') for x in models):
-                        continue
-                    path = folder / f'foto_{len(photos)}.jpg'
-                    if _safe_photo_download(url, path):
-                        photos.append(path)
-                        credits.append(candidate)
-            except Exception as exc:
-                print(f'Fuente fotográfica no disponible: {backend.__name__}: {type(exc).__name__}: {str(exc)[:120]}', flush=True)
-    (folder/'creditos_imagenes.json').write_text(json.dumps(credits, ensure_ascii=False, indent=2), encoding='utf-8')
-    print(f'Imágenes: {len(photos)}/5 fotos descargadas; '+
-          ('usando fotografías reales' if photos else 'usando fondos animados de respaldo'), flush=True)
-    return photos, credits
-
-
-def _photo_background(image_path, w=720, h=1280):
-    from PIL import ImageOps, ImageEnhance
-    with Image.open(image_path) as raw:
-        base=ImageOps.fit(raw.convert('RGB'),(w,h),method=Image.Resampling.LANCZOS)
-        base=ImageEnhance.Brightness(base).enhance(0.48)
-        return base
+                    seen.add(item['url'])
+                    score = _photo_score(item, ep, qindex)
+                    if score >= PHOTO_MIN_SCORE:
+                        candidates.append((score, item))
+            except (requests.RequestException, ValueError, KeyError) as exc:
+                print(f'Proveedor imagen {provider.__name__}: {type(exc).__name__}', flush=True)
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    chosen = folder / 'foto_principal.jpg'
+    chosen.unlink(missing_ok=True)
+    credits = []
+    for score, item in candidates[:15]:
+        if _download_photo(item['url'], chosen):
+            credits = [dict(item, relevance_score=score, text_check='tesseract_no_text_detected')]
+            break
+    (folder / 'creditos_imagenes.json').write_text(
+        json.dumps(credits, ensure_ascii=False, indent=2), encoding='utf-8')
+    if credits:
+        print(f"Fotografía única: {credits[0]['title'][:90]} ({credits[0]['provider']})", flush=True)
+        return chosen, credits
+    print('Sin fotografía pertinente y libre de texto: fondo animado de respaldo', flush=True)
+    return None, []
 
 
 def scene(ep, number, dest, photo=None):
     W, H = 720, 1280
     bg, accent = palette(number + int(ep['id'][-3:]))
-    img = _photo_background(photo, W, H) if photo else Image.new('RGB', (W, H), bg)
+    if photo is not None:
+        with Image.open(photo) as source:
+            img = ImageOps.fit(source.convert('RGB'), (W, H), method=Image.Resampling.LANCZOS)
+        img = ImageEnhance.Brightness(img).enhance(.50)
+    else:
+        img = Image.new('RGB', (W, H), bg)
     d = ImageDraw.Draw(img, 'RGBA')
     rng = random.Random(ep['id'] + str(number))
     for _ in range(8 if photo else 22):
@@ -1308,13 +1165,13 @@ def scene(ep, number, dest, photo=None):
     d.rounded_rectangle((52, 72, 668, 152), 24, fill=(255, 255, 255, 18), outline=(*accent, 200), width=3)
     d.text((77, 91), 'DATO_WOW', font=font(33, True), fill=(255, 255, 255))
     d.text((55, 187), ep['category'].upper(), font=font(19, True), fill=accent)
-    # Zona segura central: sin párrafos de narración ni frases truncadas.
+    # Franja oscura garantiza el contraste del texto educativo.
+    d.rounded_rectangle((45, 420, 675, 835), 24, fill=(4, 7, 22, 160))
     titulares = microfrases(ep)
     texto_centrado_seguro(d, titulares[number], centro_y=610, ancho=560, max_lineas=3)
     d.line((58, 1128, 662, 1128), fill=accent, width=5)
     d.text((92, 1154), 'dato wow - conocimiento en 20 segundos', font=font(23, True), fill='white')
     img.save(dest, quality=92)
-
 
 def ambient(path: Path, seconds=20):
     rate = 16000
@@ -1350,12 +1207,12 @@ def render(ep, out: Path, require_voice=False):
         print(f"AVISO: {ep['id']} sin fuentes propuestas; contenido no verificado independientemente.", flush=True)
     folder = out / ep['id']
     folder.mkdir(parents=True, exist_ok=True)
-    photos, image_credits = prepare_photos(ep, folder)
+    shared_photo, image_credits = prepare_photo(ep, folder)
     ep['image_credits'] = image_credits
     frames = []
     for i in range(5):
         path = folder / f'escena_{i}.jpg'
-        scene(ep, i, path, photos[i % len(photos)] if photos else None)
+        scene(ep, i, path, photo=shared_photo)
         frames.append(path)
     cover = out / f"{ep['id']}.jpg"
     cover.write_bytes(frames[0].read_bytes())
@@ -1471,28 +1328,22 @@ def publish_container(user_id, token, video_url, caption):
                   data={'creation_id': container})['id']
 
 
-def publish_story_container(user_id, token, video_url):
-    """Crea una Story de video independiente mediante Instagram Login API.
 
-    No incluye caption ni share_to_feed: esos campos son del Reel.
-    Un fallo tras media_publish puede ser ambiguo; el estado remoto se deja
-    en 'incierto' para impedir una duplicación accidental.
-    """
-    fields = {'media_type': 'STORIES', 'video_url': video_url}
-    container = ig_api('POST', f'{user_id}/media', token=token, data=fields)['id']
+def publish_story_container(user_id, token, video_url):
+    """Publica el mismo MP4 como Story; requiere permisos/cuenta compatibles."""
+    cid = ig_api('POST', f'{user_id}/media', token=token,
+                 data={'media_type':'STORIES','video_url':video_url})['id']
     for _ in range(30):
         time.sleep(10)
-        status = ig_api('GET', container, token=token,
-                        data={'fields': 'status_code,status'})
+        status = ig_api('GET', cid, token=token, data={'fields':'status_code,status'})
         if status.get('status_code') == 'FINISHED':
             break
         if status.get('status_code') in ('ERROR', 'EXPIRED'):
-            raise RuntimeError(f'Contenedor Story Instagram {container}: {status}')
+            raise RuntimeError(f'Story contenedor {cid}: {status}')
     else:
-        raise RuntimeError(f'Timeout contenedor Story IG {container}; reconciliar antes de reintentar')
+        raise RuntimeError(f'Story contenedor {cid} sin confirmación: no reenviar automáticamente')
     return ig_api('POST', f'{user_id}/media_publish', token=token,
-                  data={'creation_id': container})['id']
-
+                  data={'creation_id':cid})['id']
 
 
 def upload_video_to_public_github(gh, movie: Path, episode_id: str):
@@ -1569,7 +1420,7 @@ def publish(ep, movie, cover, approval):
     raw, sha = gh.read(path)
     state = json.loads(raw) if raw is not None else {'schema':1,'episodes':{}}
     row = state['episodes'].get(ep['id'], {})
-    if any(row.get(key) in ('enviando','incierto','publicado') for key in ('reel', 'foto', 'feed_video')):
+    if any(row.get(key) in ('enviando','incierto','publicado') for key in ('reel', 'foto', 'feed_video', 'story')):
         raise RuntimeError('Hay publicación previa o incierta: bloqueo anti-duplicados')
     def save():
         nonlocal sha
@@ -1603,13 +1454,9 @@ def publish(ep, movie, cover, approval):
     row['reel'] = 'publicado'
     row['share_to_feed'] = True
     row['reel_id'] = published
-    row['video_url'] = video_url
     row['updated_at'] = now()
     save()
-    print(f'Video publicado como Reel Y visible en el feed: {published}', flush=True)
-    # Story independiente: nunca borrar ni degradar 'reel=publicado' si falla.
-    # Guardar estado 'enviando' ANTES de llamar a Instagram y 'incierto' si
-    # hubo error (incluye fallos cuya publicación pudo haber ocurrido).
+    print(f'Video publicado como Reel Y visible en el feed: {published}')
     row['story'] = 'enviando'
     row['updated_at'] = now()
     save()
@@ -1620,9 +1467,8 @@ def publish(ep, movie, cover, approval):
         row['updated_at'] = now()
         try:
             save()
-        except Exception as ex:
-            print(f'ALERTA: sin persistencia del estado incierto Story: {ex}', file=sys.stderr)
-        print('Reel publicado. Story incierta o fallida; NO se repetirá el Reel.', file=sys.stderr)
+        except Exception as exc:
+            print(f'ALERTA persistencia Story: {type(exc).__name__}', file=sys.stderr)
         raise
     row['story'] = 'publicado'
     row['story_id'] = story_id
@@ -1631,12 +1477,13 @@ def publish(ep, movie, cover, approval):
     print(f'Story publicada: {story_id}', flush=True)
 
 
+
 def main():
-    ap = argparse.ArgumentParser(description='DataViral: 500 ideas, IA Groq/Gemini/OpenRouter y video Instagram')
+    ap = argparse.ArgumentParser(description='DataViral: 500 ideas, IA OpenRouter Free y video Instagram')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--episode', default='', help='ID concreto; vacío = siguiente disponible')
     ap.add_argument('--out', default='output')
-    ap.add_argument('--publish', action='store_true', help='Publicar Reel en feed y Story independiente')
+    ap.add_argument('--publish', action='store_true', help='Publicar Reel en feed y Story')
     ap.add_argument('--approved-id', default='', help='ID revisado manualmente (modo seguro)')
     ap.add_argument('--auto-publish', action='store_true', help='Publicación autónoma (sin revisión humana)')
     args=ap.parse_args()
@@ -1658,7 +1505,7 @@ def main():
     out.mkdir(exist_ok=True,parents=True)
     (out/f"{ep['id']}-guion.json").write_text(
         json.dumps(generated,ensure_ascii=False,indent=2),encoding='utf-8')
-    print(f"Guion IA creado: {ep['id']}; referencias propuestas: {generated['source'] or 'ninguna'}")
+    print(f"Guion OpenRouter creado: {ep['id']}; referencias propuestas: {generated['source'] or 'ninguna'}")
     if args.publish and not generated.get('source'):
         print('AVISO: el guion no tiene fuentes; se permite publicar, pero no existe verificación independiente.', flush=True)
     movie,cover=render(generated,out,require_voice=args.publish)
