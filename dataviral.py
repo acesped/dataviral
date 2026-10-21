@@ -1076,7 +1076,7 @@ PHOTO_STOP = {
     'todo','todos','ellas','ellos','del','las','los','con','una','que',
 }
 PHOTO_MIN_SCORE = int(os.getenv('DV_IMAGE_MIN_SCORE', '7'))
-PHOTO_MAX_QUERIES = int(os.getenv('DV_IMAGE_MAX_QUERIES', '6'))
+PHOTO_MAX_QUERIES = int(os.getenv('DV_IMAGE_MAX_QUERIES', '9'))
 
 
 def _photo_words(value):
@@ -1087,30 +1087,66 @@ def _photo_words(value):
 
 
 def _photo_queries(ep):
-    """Consultas de lo específico a lo general, también en inglés si están curadas.
+    """Buscar escenas fotográficas, no títulos educativos completos.
 
-    Los títulos largos en español suelen devolver cero archivos en Commons.
-    Evitar ampliar al tema genérico si existen palabras específicas.
+    Las etiquetas españolas se combinan con vocabulario inglés de fotografía:
+    Commons y Openverse etiquetan muchos recursos en inglés.
     """
     manual = str(ep.get('image_query') or '').strip()
     title = str(ep.get('title') or '').strip()
-    terms = list(dict.fromkeys(_photo_words(title)))[:7]
-    fact = list(dict.fromkeys(_photo_words(ep.get('fact') or ep.get('lesson'))))[:5]
-    extra = [term for term in fact if term not in terms]
     category = str(ep.get('category') or '').lower()
-    hints = {
-        'ciencia': 'science nature', 'psicolog': 'brain neuroscience',
-        'tecnolog': 'technology device', 'historia': 'historical artifact',
-        'espacio': 'astronomy space', 'animal': 'animal wildlife',
-        'seguridad': 'safety',
+    terms = list(dict.fromkeys(_photo_words(title)))
+    # Palabras de contexto muy frecuentes que no describen objetos visibles.
+    generic = {'explicar', 'concreto', 'rigor', 'consecuencia', 'cambio',
+               'importante', 'causa', 'hace', 'puede', 'efecto', 'razon', 'razones'}
+    terms = [w for w in terms if w not in generic]
+    # Diccionario descriptivo, no IA de imágenes ni traducción de afirmaciones.
+    vocabulary = {
+        'emocion':'human emotion face expression', 'emociones':'human emotion',
+        'atencion':'attention focused person', 'cerebro':'human brain neuroscience',
+        'memoria':'brain memory', 'psicologia':'human psychology',
+        'sueno':'sleeping person', 'ansiedad':'person anxious', 'estres':'stress person',
+        'floracion':'flower blooming botanical', 'flor':'flower blossom',
+        'flores':'flowers blooming', 'planta':'green plant botany',
+        'plantas':'green plants', 'abeja':'bee flower',
+        'oceano':'ocean water', 'mar':'sea ocean', 'agua':'water nature',
+        'volcan':'volcano mountain', 'terremoto':'earthquake geology',
+        'luna':'moon astronomy', 'sol':'sun astronomy',
+        'estrella':'stars astronomy', 'galaxia':'galaxy space',
+        'animal':'wildlife animal', 'pulpo':'octopus underwater',
+        'perro':'dog animal', 'gato':'cat animal',
+        'historia':'historical artifacts museum', 'tecnologia':'technology electronics',
+        'bacteria':'bacteria microscope', 'insecto':'insect macro photography',
+        'corazon':'human heart anatomy', 'ojo':'human eye close up',
+        'musculo':'human muscles anatomy', 'energia':'electric energy',
+        'electricidad':'electricity power', 'bosque':'forest trees',
     }
-    hint = next((v for k, v in hints.items() if k in _photo_words(category) or k in category), '')
-    queries = [manual, title, ' '.join(terms[:5]),
-               ' '.join(terms[:3] + extra[:2]),
-               ' '.join(terms[:2] + hint.split()[:2]),
-               ' '.join(terms[:2])]
-    unique = list(dict.fromkeys(q[:110].strip() for q in queries if q.strip()))
-    return unique[:PHOTO_MAX_QUERIES]
+    visual_terms = []
+    for word in terms:
+        if word in vocabulary:
+            visual_terms.append(vocabulary[word])
+    category_hints = {
+        'psicolog': 'person portrait expressive face emotion',
+        'ciencia': 'nature scientific photography',
+        'naturaleza': 'nature botanical wildlife photography',
+        'tecnolog': 'computer circuit electronics photography',
+        'historia': 'historical museum artifact photo',
+        'espacio': 'astronomy telescope night sky photo',
+        'animal': 'animal wildlife photograph',
+        'salud': 'human anatomy biology photograph',
+    }
+    hint = next((v for k,v in category_hints.items() if k in category), 'nature science photo')
+    queries = [manual] if manual else []
+    queries += visual_terms[:3]
+    if len(visual_terms) >= 2:
+        queries.insert(1 if manual else 0, ' '.join(visual_terms[:2]))
+    queries += [' '.join(terms[:3]), ' '.join(terms[:2]), title, hint]
+    unique = []
+    for q in queries:
+        q = re.sub(r'\s+', ' ', q).strip()[:100]
+        if q and q.lower() not in {x.lower() for x in unique}:
+            unique.append(q)
+    return unique[:max(4, min(12, PHOTO_MAX_QUERIES))]
 
 
 def _photo_get(url, *, params=None, stream=False):
@@ -1171,7 +1207,10 @@ def _openverse_photos(query):
 
 
 def _photo_score(item, ep, query_index):
-    """Prioriza coincidencias concretas sin rechazar por metadatos inocuos."""
+    """La relevancia combina orden de búsqueda y coincidencia descriptiva.
+
+    No exigir tokens idénticos español/inglés: eso excluía casi todas las fotos.
+    """
     meta = ' '.join(str(item.get(x) or '') for x in ('title', 'description'))
     normalized = unicodedata.normalize('NFKD', meta.lower())
     normalized = ''.join(x for x in normalized if not unicodedata.combining(x))
@@ -1179,48 +1218,38 @@ def _photo_score(item, ep, query_index):
            for term in PHOTO_REJECT_METADATA):
         return -1
     words = set(_photo_words(meta))
-    main = set(_photo_words(ep.get('title')))
-    manual = set(_photo_words(ep.get('image_query')))
-    extra = set(_photo_words(ep.get('fact'))) | set(_photo_words(ep.get('lesson')))
-    # No basta una categoría general: tiene que coincidir al menos un concepto.
-    hits = len(words & (main | manual | extra))
-    if hits == 0:
-        return -1
-    return hits * 9 + len(words & main) * 5 + len(words & manual) * 6 + max(0, 8-query_index)
+    title_words = set(_photo_words(ep.get('title')))
+    exact_hits = len(words & title_words)
+    # La primera búsqueda es intencionalmente visual y específica.
+    return max(0, 44 - query_index * 7) + 9 * exact_hits
 
 
 def _photo_has_text(path):
-    """OCR por palabras con confianza; evita falsos positivos de ruido visual.
+    """Descarta fotografías con palabras detectadas; nunca certifica ausencia total.
 
-    Si falta Tesseract, rechaza conservadoramente. Ningún OCR garantiza
-    detectar toda letra o marca de agua: conviene inspección editorial.
+    La confianza de OCR aislado se verifica en dos modos para disminuir ruido.
     """
     exe = shutil.which('tesseract')
     if not exe:
-        print('Fotografía omitida: instalar tesseract-ocr en el workflow', flush=True)
+        print('FOTO RECHAZADA: falta tesseract-ocr. Instalar con apt-get en Actions.', flush=True)
         return True
     try:
         import csv
         for psm in ('11', '6'):
             res = subprocess.run([exe, str(path), 'stdout', '--psm', psm, 'tsv'],
                                  capture_output=True, text=True, timeout=22, check=True)
-            rows = csv.DictReader(io.StringIO(res.stdout), delimiter='\t')
-            words = []
-            for row in rows:
+            for row in csv.DictReader(io.StringIO(res.stdout), delimiter='\t'):
                 token = (row.get('text') or '').strip()
                 try:
                     confidence = float(row.get('conf', '-1'))
                 except ValueError:
                     continue
                 letters = re.sub(r'[^A-Za-zÀ-ÿ0-9]', '', token)
-                # Alta confianza en palabra legible o número de varias cifras.
-                if confidence >= 65 and len(letters) >= 3:
-                    words.append(letters)
-            if words:
-                print('Fotografía rechazada: OCR detectó texto legible', flush=True)
-                return True
+                if confidence >= 75 and len(letters) >= 3:
+                    print(f'FOTO RECHAZADA: texto detectado (OCR, modo {psm})', flush=True)
+                    return True
     except (OSError, subprocess.SubprocessError, ValueError):
-        print('Fotografía rechazada: OCR no pudo verificarse', flush=True)
+        print('FOTO RECHAZADA: error al comprobar texto mediante OCR', flush=True)
         return True
     return False
 
@@ -1264,36 +1293,48 @@ def _download_photo(url, target):
 
 
 def prepare_photo(ep, folder):
-    """Exactamente cero o una imagen para todo el video."""
+    """Selecciona una sola foto aprobada para las cinco escenas."""
     queries = _photo_queries(ep)
+    print(f'FOTO: búsquedas del episodio {ep["id"]}: {queries}', flush=True)
     candidates, seen = [], set()
+    stats = {'resultados': 0, 'metadatos_rechazados': 0,
+             'descargas_fallidas_o_texto': 0, 'proveedores_fallidos': 0}
     for qindex, query in enumerate(queries):
         for provider in (_commons_photos, _openverse_photos):
             try:
+                count = 0
                 for item in provider(query):
+                    count += 1
                     if item['url'] in seen:
                         continue
                     seen.add(item['url'])
                     score = _photo_score(item, ep, qindex)
-                    if score >= PHOTO_MIN_SCORE:
+                    if score >= 0:
                         candidates.append((score, item))
+                    else:
+                        stats['metadatos_rechazados'] += 1
+                stats['resultados'] += count
+                print(f'FOTO: {provider.__name__}: {count} resultados para {query!r}', flush=True)
             except (requests.RequestException, ValueError, KeyError) as exc:
-                print(f'Proveedor imagen {provider.__name__}: {type(exc).__name__}', flush=True)
+                stats['proveedores_fallidos'] += 1
+                print(f'FOTO: error {provider.__name__}: {type(exc).__name__}: {str(exc)[:130]}', flush=True)
     candidates.sort(key=lambda x: x[0], reverse=True)
-    print(f'Imágenes: {len(candidates)} candidatas temáticas tras metadatos; consultas={len(queries)}', flush=True)
     chosen = folder / 'foto_principal.jpg'
     chosen.unlink(missing_ok=True)
     credits = []
-    for score, item in candidates[:30]:
+    print(f'FOTO: {len(candidates)} candidatas aptas por metadatos; OCR={bool(shutil.which("tesseract"))}', flush=True)
+    for score, item in candidates[:60]:
         if _download_photo(item['url'], chosen):
             credits = [dict(item, relevance_score=score, text_check='tesseract_no_text_detected')]
             break
+        stats['descargas_fallidas_o_texto'] += 1
     (folder / 'creditos_imagenes.json').write_text(
         json.dumps(credits, ensure_ascii=False, indent=2), encoding='utf-8')
     if credits:
-        print(f"Fotografía única: {credits[0]['title'][:90]} ({credits[0]['provider']})", flush=True)
+        print(f'FOTO SELECCIONADA: {credits[0]["title"][:100]} ({credits[0]["provider"]})', flush=True)
         return chosen, credits
-    print('Sin fotografía aceptable: revisar avisos de fuentes, OCR y descargas; fondo animado', flush=True)
+    print(f'FOTO NO DISPONIBLE: {stats}. Usando fondo de respaldo. '
+          'Comprueba tesseract-ocr, respuestas de Wikimedia/Openverse y hosts de descarga.', flush=True)
     return None, []
 
 
@@ -1308,7 +1349,7 @@ def scene(ep, number, dest, photo=None):
         img = Image.new('RGB', (W, H), bg)
     d = ImageDraw.Draw(img, 'RGBA')
     rng = random.Random(ep['id'] + str(number))
-    for _ in range(8 if photo else 22):
+    for _ in range(0 if photo else 22):
         x, y = rng.randrange(-150, 800), rng.randrange(-150, 1400)
         r = rng.randrange(15, 145)
         d.ellipse((x-r, y-r, x+r, y+r), outline=(*accent, rng.randrange(22, 90)), width=rng.randrange(2, 8))
