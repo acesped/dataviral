@@ -695,44 +695,92 @@ def _parse_five_visuals(raw):
     return [found[i] for i in range(1,6)]
 
 
-def _mensajes_locales_desde_guion(narration):
-    """Respaldo extractivo: frases del guion, nunca hechos inventados.
+def _validar_mensaje_individual(frase, narracion):
+    """Aplicar límites de escena sin obligar a disponer de cinco mensajes."""
+    if not isinstance(frase, str):
+        return None
+    frase = re.sub(r'\s+', ' ', frase).strip().strip('"“”').strip(' .,:;!?¿¡')
+    if not 3 <= len(frase.split()) <= VISUAL_MAX_WORDS or len(frase) > VISUAL_MAX_CHARS:
+        return None
+    normal = _visual_normalizado(frase)
+    if any(generic in normal for generic in GENERIC_VISUALS):
+        return None
+    universo = _palabras_relevantes(' '.join(str(narracion.get(k, '')) for k in
+                                   ('script', 'title', 'fact', 'lesson')))
+    if not (_palabras_relevantes(frase) & universo):
+        return None
+    if not re.search(r'[a-záéíóúñ]', frase, flags=re.I):
+        return None
+    return frase
 
-    Utiliza solamente oraciones o proposiciones completas tal como aparecen
-    en la narración. Si el guion no contiene cinco ideas autosuficientes y
-    legibles, falla de forma segura en lugar de fabricar afirmaciones.
+
+def _fragmentos_completos(texto):
+    """Conservar solo cláusulas que puedan funcionar solas, sin cortar por longitud."""
+    text = re.sub(r'\s+', ' ', str(texto or '')).strip()
+    if not text:
+        return
+    pieces = re.split(r'(?<=[.!?;])\s+|\s*[;:]\s*', text)
+    for piece in pieces:
+        piece = piece.strip(' \t\n.,;:¡!¿?')
+        if piece:
+            yield piece
+        # Solo separar cláusulas con puntuación explícita, nunca a mitad de palabra.
+        for part in re.split(r',\s+(?=(?:pero|aunque|además|sin embargo|por eso|mientras)\b)', piece, flags=re.I):
+            part = re.sub(r'^(?:pero|aunque|además|sin embargo|por eso),?\s+', '', part.strip(' ,.;:!?¿¡'), flags=re.I)
+            if part and part != piece:
+                yield part
+
+
+def _mensajes_recuperados(narration, respuestas=()):
+    """Aprovechar escenas válidas incluso si otras exceden el límite.
+
+    Complementar solo con proposiciones literales del relato, el dato y la
+    lección; nunca repetir frases ni inventar información para llegar a cinco.
     """
-    script = narration['script']
-    # Separar únicamente por puntuación fuerte y conectores que mantienen
-    # una proposición independiente. Evitamos cortar por número de palabras.
-    sentences = re.split(r'(?<=[.!?;])\s+|(?<=;)\s*', script)
-    candidates = []
-    for sentence in sentences:
-        sentence = sentence.strip(' \t\n.,;:¡!¿?')
-        if not sentence:
-            continue
-        parts = re.split(r'\s*[;:]\s*|,\s+(?=(?:pero|aunque|sin embargo|por eso|además)\b)', sentence, flags=re.I)
-        for part in parts:
-            part = part.strip(' \t\n.,;:¡!¿?')
-            # Eliminar conectores iniciales solo cuando queda una oración
-            # con verbo; no reconstruir ni parafrasear el contenido.
-            part = re.sub(r'^(?:pero|aunque|sin embargo|además|por eso),?\s+', '', part, flags=re.I)
-            if part and 3 <= len(part.split()) <= VISUAL_MAX_WORDS and len(part) <= VISUAL_MAX_CHARS:
-                candidates.append(part)
+    seen = set()
     valid = []
-    for candidate in candidates:
-        try:
-            validar_microfrases([candidate] * 5, script, narration['title'], narration['fact'], narration['lesson'])
-        except ValueError as exc:
-            if 'texto repetido' not in str(exc):
-                continue
-        valid.append(candidate)
-    # No replicar mensajes para completar cinco escenas.
-    unique = list(dict.fromkeys(valid))
-    if len(unique) < 5:
-        raise ValueError(f'el guion solo contiene {len(unique)} frases breves extraíbles (requiere 5)')
-    return validar_microfrases(unique[:5], script, narration['title'], narration['fact'], narration['lesson'])
 
+    def append_one(texto):
+        frase = _validar_mensaje_individual(texto, narration)
+        if frase is None:
+            return
+        norm = _visual_normalizado(frase)
+        if norm in seen:
+            return
+        seen.add(norm)
+        valid.append(frase)
+
+    for response in respuestas:
+        for frase in response:
+            append_one(frase)
+            # Recuperar también cláusulas completas de una frase demasiado larga.
+            for piece in _fragmentos_completos(frase):
+                append_one(piece)
+    for field in ('script', 'fact', 'lesson'):
+        for piece in _fragmentos_completos(narration.get(field, '')):
+            append_one(piece)
+    if len(valid) < 5:
+        raise ValueError(f'solo se recuperaron {len(valid)} mensajes completos y distintos (requiere 5)')
+    return validar_microfrases(valid[:5], narration['script'], narration['title'], narration['fact'], narration['lesson'])
+
+
+def _mensajes_locales_desde_guion(narration):
+    return _mensajes_recuperados(narration)
+
+
+def _mensajes_parciales_respuesta(raw):
+    """Recuperar propuestas 1–5 aunque alguna esté mal formada o sea larga."""
+    try:
+        arr = _parse_five_visuals(raw)
+        return [item for item in arr if isinstance(item, str)]
+    except (ValueError, TypeError, KeyError):
+        pass
+    pieces = []
+    for line in str(raw or '').splitlines():
+        match = re.match(r'^\s*(?:MENSAJE[_ ]?|ESCENA[_ ]?|[-*]\s*)\s*([1-5])\s*[.):-]\s*(.+?)\s*$', line, re.I)
+        if match:
+            pieces.append(match.group(2).strip().strip('"“”'))
+    return pieces
 
 def create_ai_episode(ep):
     """Dos etapas cortas: narración, después cinco mensajes visuales.
@@ -788,6 +836,7 @@ def create_ai_episode(ep):
     )
     visuals = None
     visual_model = None
+    respuestas_parciales = []
     # Antes de otra solicitud, no hay parámetro costoso de razonamiento forzado:
     # muchos proveedores gratuitos no lo admiten; los prompts cortos reducen consumo.
     # El modelo que completó bien la narración recibe la primera oportunidad.
@@ -795,6 +844,7 @@ def create_ai_episode(ep):
     for model, _ in visual_candidates:
         try:
             raw = _openrouter_text(key, model, visuals_prompt, max_tokens=1900)
+            respuestas_parciales.append(_mensajes_parciales_respuesta(raw))
             proposed = _parse_five_visuals(raw)
             visuals = validar_microfrases(proposed, narration['script'],
                                            narration['title'], narration['fact'], narration['lesson'])
@@ -810,13 +860,13 @@ def create_ai_episode(ep):
         # Evitar fallar por una segunda llamada cuando el propio guion
         # contiene cinco proposiciones breves. Nunca inventar información.
         try:
-            visuals = _mensajes_locales_desde_guion(narration)
-            visual_model = 'extractivo-local'
-            print('Cinco mensajes recuperados literalmente del guion (sin IA adicional)', flush=True)
+            visuals = _mensajes_recuperados(narration, respuestas_parciales)
+            visual_model = 'recuperacion-mixta'
+            print('Cinco mensajes recuperados de propuestas de IA y del guion (sin inventar datos)', flush=True)
         except ValueError as exc:
             raise RuntimeError(
                 'Narración válida, pero no se obtuvieron cinco mensajes seguros. '
-                f'OpenRouter: {last_problem}. Respaldo local: {exc}. '
+                f'OpenRouter: {last_problem}. Recuperación: {exc}. '
                 'No se publicó nada.'
             ) from exc
 
