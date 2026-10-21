@@ -764,6 +764,63 @@ def _mensajes_recuperados(narration, respuestas=()):
     return validar_microfrases(valid[:5], narration['script'], narration['title'], narration['fact'], narration['lesson'])
 
 
+def _completar_mensajes_con_ia(narration, respuestas, key, models):
+    """Recuperación incremental: usa frases válidas y pide SOLO las faltantes.
+
+    Las respuestas nuevas se validan; nunca se aceptan afirmaciones sin relación
+    con el guion. El guardarraíl factual definitivo sigue siendo revisión humana.
+    """
+    pool = [list(x) for x in respuestas]
+    attempts = 0
+    for model in models:
+        if attempts >= 8:
+            break
+        try:
+            return _mensajes_recuperados(narration, pool)
+        except ValueError:
+            pass
+        # Selecciona cuántas frases completas existen, sin tomar fragmentos largos.
+        acc = []
+        for batch in pool:
+            acc.extend(batch)
+        existing = []
+        seen = set()
+        for text in acc:
+            validated = _validar_mensaje_individual(text, narration)
+            if validated and _visual_normalizado(validated) not in seen:
+                existing.append(validated)
+                seen.add(_visual_normalizado(validated))
+        n = max(1, 5 - len(existing))
+        prompt = (
+            f'Genera EXACTAMENTE {n} frases educativas NUEVAS y DIFERENTES, '
+            'cada una con entre 3 y 7 palabras y 45 caracteres como MÁXIMO. '
+            'No incluyas introducciones, numeración, citas, ni explicaciones. '
+            'Cada frase debe expresar una idea completa y comprobable SOLO en '
+            'este guion, sin añadir cifras, causalidades ni hechos nuevos. '
+            'Si una frase se pasa de largo, REFORMÚLALA en vez de cortarla. '
+            'Una frase por línea. Evita repetir estos mensajes: '
+            + json.dumps(existing, ensure_ascii=False) + '\n'
+            + 'TÍTULO: ' + narration['title'] + '\n'
+            + 'GUION: ' + narration['script'] + '\n'
+            + 'DATO: ' + narration['fact'] + '\n'
+            + 'ENSEÑANZA: ' + narration['lesson']
+        )
+        attempts += 1
+        try:
+            raw = _openrouter_text(key, model, prompt, max_tokens=550)
+        except (ValueError, RuntimeError, requests.RequestException) as exc:
+            print(f'IA complemento {attempts}: {model}: {str(exc)[:130]}', flush=True)
+            continue
+        lines = []
+        for line in raw.splitlines():
+            line = re.sub(r'^\s*(?:[-*•]|(?:MENSAJE[_ ]?)?\d{1,2}[.)\-:]?)\s*', '', line).strip(' "“”')
+            if line:
+                lines.append(line)
+        pool.append(lines)
+        print(f'IA complemento {attempts}: {model} devolvió {len(lines)} posibles frases', flush=True)
+    return _mensajes_recuperados(narration, pool)
+
+
 def _mensajes_locales_desde_guion(narration):
     return _mensajes_recuperados(narration)
 
@@ -864,11 +921,20 @@ def create_ai_episode(ep):
             visual_model = 'recuperacion-mixta'
             print('Cinco mensajes recuperados de propuestas de IA y del guion (sin inventar datos)', flush=True)
         except ValueError as exc:
-            raise RuntimeError(
-                'Narración válida, pero no se obtuvieron cinco mensajes seguros. '
-                f'OpenRouter: {last_problem}. Recuperación: {exc}. '
-                'No se publicó nada.'
-            ) from exc
+            print(f'Recuperación inicial insuficiente ({exc}); intentando completar solo mensajes faltantes', flush=True)
+            try:
+                visuals = _completar_mensajes_con_ia(
+                    narration, respuestas_parciales, key,
+                    [model for model, _ in visual_candidates]
+                )
+                visual_model = 'recuperacion-incremental'
+                print('Cinco mensajes recuperados y validados mediante complemento incremental', flush=True)
+            except ValueError as final_exc:
+                raise RuntimeError(
+                    'Narración válida, pero no se obtuvieron cinco mensajes seguros. '
+                    f'OpenRouter: {last_problem}. Recuperación: {final_exc}. '
+                    'No se publicó nada.'
+                ) from final_exc
 
     result = dict(ep)
     result.update(
