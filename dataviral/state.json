@@ -147,10 +147,11 @@
     },
     "DV-279": {
       "reel": "publicado",
-      "updated_at": "2026-10-21T09:03:38.885223+00:00",
+      "updated_at": "2026-10-21T09:03:40.006145+00:00",
       "share_to_feed": true,
       "reel_id": "17956134570291119",
-      "video_url": "https://raw.githubusercontent.com/acesped/dataviral/a13f31568962cde089e644e4b040a5e89d910c20/datoviral_assets/media/DV-279-d1dc41afaa4a96ad.mp4"
+      "video_url": "https://raw.githubusercontent.com/acesped/dataviral/a13f31568962cde089e644e4b040a5e89d910c20/datoviral_assets/media/DV-279-d1dc41afaa4a96ad.mp4",
+      "story": "enviando"
     }
   }
 }
