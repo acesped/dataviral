@@ -51,18 +51,39 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
-      - name: Instalar librerias y FFmpeg
+
+      - name: Instalar librerias FFmpeg y Tesseract OCR
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg fonts-dejavu-core tesseract-ocr tesseract-ocr-eng tesseract-ocr-spa
           python -m pip install -r requirements.txt
+
+      - name: Verificar herramientas de video y OCR
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v ffmpeg >/dev/null || { echo '::error::FFmpeg no instalado'; exit 1; }
+          command -v tesseract >/dev/null || { echo '::error::Tesseract OCR no instalado'; exit 1; }
+          ffmpeg -version | head -n 1
+          tesseract --version 2>&1 | head -n 1
+          tesseract --list-langs 2>&1
+          python - <<'PY'
+          import shutil
+          from PIL import Image
+          assert shutil.which('ffmpeg'), 'FFmpeg no disponible'
+          assert shutil.which('tesseract'), 'Tesseract no disponible'
+          print('Pillow, FFmpeg y OCR disponibles. Las fotos se validaran antes del render.')
+          PY
+
       - name: Verificar catalogo y sintaxis
         shell: bash
         run: |
@@ -70,28 +91,29 @@ jobs:
           python -m py_compile dataviral.py
           python - <<'PY'
           import dataviral
-          episodes=dataviral.catalog()
-          assert len(episodes)==500
-          assert len({ep['id'] for ep in episodes})==500
+          episodes = dataviral.catalog()
+          assert len(episodes) == 500
+          assert len({ep['id'] for ep in episodes}) == 500
           print('Catalogo de 500 temas cargado')
           PY
+
       - name: Diagnosticar usuario Instagram
         shell: bash
         env:
           REPOSITORY_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
-          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME || 'dato_wow_' }}
         run: |
           set -euo pipefail
           echo "Repositorio: $GITHUB_REPOSITORY"
           echo "Rama del workflow: $GITHUB_REF"
           if [[ -z "${REPOSITORY_USERNAME:-}" ]]; then
-            echo "::warning::IG_EXPECTED_USERNAME no disponible en Repository variables; se usara el respaldo @dato_wow_."
+            echo '::warning::IG_EXPECTED_USERNAME no definida en Repository variables; se usara @dato_wow_.'
           else
-            echo "Usuario obtenido desde Repository variables."
+            echo 'Usuario obtenido desde Repository variables.'
           fi
-          [[ -n "${IG_EXPECTED_USERNAME:-}" ]] || { echo "::error::Usuario Instagram vacio"; exit 1; }
+          [[ -n "${IG_EXPECTED_USERNAME:-}" ]] || { echo '::error::Usuario Instagram vacio'; exit 1; }
           echo "Usuario esperado: @${IG_EXPECTED_USERNAME}"
-      - name: Validar configuración
+
+      - name: Validar configuracion
         shell: bash
         env:
           PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
@@ -100,32 +122,26 @@ jobs:
           APPROVED: ${{ inputs.approved_id }}
         run: |
           set -euo pipefail
-          [[ -n "${GROQ_API_KEY:-}" || -n "${GEMINI_API_KEY:-}" || -n "${OPENROUTER_API_KEY:-}" ]] || { echo '::error::Configura GROQ_API_KEY, GEMINI_API_KEY u OPENROUTER_API_KEY'; exit 1; }
+          [[ -n "${GROQ_API_KEY:-}" || -n "${GEMINI_API_KEY:-}" || -n "${OPENROUTER_API_KEY:-}" ]] || { echo '::error::Configura una clave de IA'; exit 1; }
           if [[ "$PUBLISH" == true ]]; then
             [[ -n "${INSTAGRAM_TOKEN:-}" && -n "${INSTAGRAM_USER_ID:-}" ]] || { echo '::error::Faltan secretos de Instagram'; exit 1; }
-            [[ "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]] || { echo '::error::INSTAGRAM_USER_ID no es numerico'; exit 1; }
-            [[ -n "${IG_EXPECTED_USERNAME:-}" ]] || { echo '::error::IG_EXPECTED_USERNAME vacio incluso tras aplicar respaldo'; exit 1; }
-            # Si no se especifica ID, el flujo elige uno pendiente y autoriza
-            # esa seleccion automaticamente (no exige approved_id).
+            [[ "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]] || { echo '::error::INSTAGRAM_USER_ID no numerico'; exit 1; }
+            [[ -n "${IG_EXPECTED_USERNAME:-}" ]] || { echo '::error::IG_EXPECTED_USERNAME vacio'; exit 1; }
             if [[ -z "$EPISODE" ]]; then
-              echo "Modo autonomo: se seleccionara un episodio pendiente de forma aleatoria y equilibrada."
+              echo 'Modo autonomo: seleccion de episodio pendiente.'
             elif [[ "$AUTO" != true ]]; then
-              [[ "$EPISODE" == "$APPROVED" ]] || { echo '::error::Con ID especifico, confirma approved_id o activa auto_publish'; exit 1; }
+              [[ "$EPISODE" == "$APPROVED" ]] || { echo '::error::Confirma approved_id o activa auto_publish'; exit 1; }
             fi
           fi
+
       - name: Informar proveedores de IA
         shell: bash
         run: |
-          echo 'Orden de proveedores: Groq, Gemini, OpenRouter gratuito'
-      - name: Generar video con fotografias libres y publicar
+          echo 'Proveedores configurables: Groq, Gemini y OpenRouter gratuito'
+
+      - name: Generar video con foto unica sin textos y publicar
         shell: bash
         env:
-          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME || 'dato_wow_' }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
-          INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
           PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
           AUTO: ${{ inputs.auto_publish && 'true' || 'false' }}
           EPISODE: ${{ inputs.episode_id }}
@@ -135,14 +151,13 @@ jobs:
           args=()
           if [[ -n "$EPISODE" ]]; then args+=(--episode "$EPISODE"); fi
           if [[ "$PUBLISH" == true ]]; then args+=(--publish); fi
-          # Con publicacion y sin episodio se habilita la seleccion autonoma,
-          # incluso si auto_publish no se marco en la interfaz.
           if [[ "$AUTO" == true || ( "$PUBLISH" == true && -z "$EPISODE" ) ]]; then
             args+=(--auto-publish)
           fi
           if [[ -n "$APPROVED" ]]; then args+=(--approved-id "$APPROVED"); fi
           python dataviral.py "${args[@]}"
-      - name: Guardar guion y MP4
+
+      - name: Guardar guion MP4 y evidencias de imagen
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -151,5 +166,7 @@ jobs:
             output/*.json
             output/*.mp4
             output/*.jpg
+            output/**/foto_principal.jpg
+            output/**/creditos_imagenes.json
           if-no-files-found: ignore
           retention-days: 7
