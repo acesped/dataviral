@@ -1443,11 +1443,18 @@ def scene(ep, number, dest, photo=None):
     bg, accent = palette(number + int(ep['id'][-3:]))
     if photo is None or not Path(photo).is_file():
         raise RuntimeError('No hay fotografía de fondo: se prohíbe crear escenas con fondos planos.')
-    if photo is not None:
-        with Image.open(photo) as source:
-            img = ImageOps.fit(source.convert('RGB'), (W, H), method=Image.Resampling.LANCZOS)
-        img = ImageEnhance.Brightness(img).enhance(.63)
+    # Una misma fotografía real, sin texto detectado previamente por OCR,
+    # permanece durante las cinco escenas. Se muestra siempre en blanco y negro.
+    with Image.open(photo) as source:
+        source = ImageOps.exif_transpose(source)
+        img = ImageOps.fit(source.convert('RGB'), (W, H), method=Image.Resampling.LANCZOS)
+    img = ImageOps.grayscale(img)
+    img = ImageEnhance.Contrast(img).enhance(1.15)
+    img = ImageEnhance.Brightness(img).enhance(0.55)
+    img = img.convert('RGB')
     d = ImageDraw.Draw(img, 'RGBA')
+    # Película negra sutil: aumenta el contraste sin ocultar el tema de la foto.
+    d.rectangle((0, 0, W, H), fill=(0, 0, 0, 45))
     # Sin círculos decorativos: la imagen fotográfica permanece limpia.
     d.rounded_rectangle((52, 72, 668, 152), 24, fill=(255, 255, 255, 18), outline=(*accent, 200), width=3)
     d.text((77, 91), 'DATO_WOW', font=font(33, True), fill=(255, 255, 255))
