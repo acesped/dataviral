@@ -237,10 +237,11 @@
     },
     "DV-375": {
       "reel": "publicado",
-      "updated_at": "2026-10-22T15:22:51.944136+00:00",
+      "updated_at": "2026-10-22T15:23:29.118581+00:00",
       "share_to_feed": true,
       "reel_id": "18115823150043631",
-      "story": "enviando"
+      "story": "publicado",
+      "story_id": "17908745550567723"
     }
   }
 }
