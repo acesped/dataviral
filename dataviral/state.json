@@ -221,10 +221,11 @@
     },
     "DV-287": {
       "reel": "publicado",
-      "updated_at": "2026-10-22T03:02:21.385375+00:00",
+      "updated_at": "2026-10-22T03:02:57.381119+00:00",
       "share_to_feed": true,
       "reel_id": "17975529849160417",
-      "story": "enviando"
+      "story": "publicado",
+      "story_id": "17917319898264786"
     }
   }
 }
