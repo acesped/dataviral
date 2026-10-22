@@ -1088,69 +1088,92 @@ def _photo_words(value):
             if x not in PHOTO_STOP]
 
 
-def _photo_queries(ep):
-    """Buscar escenas fotográficas, no títulos educativos completos.
+# Asociaciones de conceptos concretos con objetos fotografiables; no se usan
+# pistas genéricas de categoría para elegir fondos irrelevantes.
+PHOTO_CONCEPTS = {
+    'huella digital': 'fingerprint closeup', 'firma invisible': 'laptop browser fingerprinting',
+    'navegador': 'laptop web browser', 'internet': 'laptop internet router',
+    'privacidad': 'laptop privacy cybersecurity', 'contraseña': 'computer keyboard password',
+    'cerebro': 'human brain model', 'memoria': 'human brain model',
+    'atención': 'person concentrating', 'emociones': 'human facial expression',
+    'ansiedad': 'anxious human portrait', 'sueño': 'sleeping person',
+    'abejas': 'honeybee on flower', 'volcán': 'volcano eruption',
+    'océano': 'ocean water', 'pulpo': 'octopus underwater',
+    'satélite': 'satellite orbit earth', 'luna': 'moon surface',
+    'bacterias': 'bacteria microscope', 'corazón': 'human heart anatomy model',
+}
+PHOTO_QUERY_STOP = set('photo photograph photography images image picture stock high resolution realistic creative beautiful background vertical'.split())
 
-    Las etiquetas españolas se combinan con vocabulario inglés de fotografía:
-    Commons y Openverse etiquetan muchos recursos en inglés.
+
+def _visual_query_ai(ep):
+    """Solicita un SUJETO VISUAL concreto usando el guion final, no la categoría.
+
+    Respuesta validada; si los proveedores fallan se recurre a términos explícitos
+    del título. El resultado no se interpreta como una verificación factual.
     """
+    if os.getenv('DV_DISABLE_VISUAL_AI', '').lower() in ('1', 'true', 'yes'):
+        return ''
+    prompt = (
+        'Actúa como buscador de FOTOGRAFÍAS de Wikimedia Commons. Lee este episodio. '
+        'Responde ÚNICAMENTE con una frase de búsqueda EN INGLÉS de 2 a 5 '
+        'palabras que describa el OBJETO, PERSONA o ESCENA FÍSICA central '
+        'que represente este guion. Evita conceptos abstractos, fotografías '
+        'genéricas de ciencia, gráficos, pantallas con texto, carteles, '        'infografías y palabras como photo. No agregues explicaciones. '
+        f"TÍTULO: {str(ep.get('title',''))[:150]}. "
+        f"GUION: {str(ep.get('script',''))[:500]}. "
+        f"DATO: {str(ep.get('fact',''))[:150]}."
+    )
+    try:
+        models = _ai_candidates()
+    except Exception as exc:
+        print(f'FOTO: no se pudo consultar IA para la búsqueda: {type(exc).__name__}', flush=True)
+        return ''
+    for provider, model, key in models[:5]:
+        try:
+            raw = _provider_text(provider, model, key, prompt, max_tokens=90)
+            line = raw.strip().splitlines()[0].strip(' \"\'`.:;')
+            if not re.fullmatch(r'[A-Za-z][A-Za-z0-9, -]{5,85}', line):
+                continue
+            words = [w for w in _photo_words(line) if w not in PHOTO_QUERY_STOP]
+            if 2 <= len(words) <= 7:
+                print(f'FOTO: sujeto visual del guion: {line!r}', flush=True)
+                return line
+        except Exception as exc:
+            print(f'FOTO: búsqueda visual IA falló con {provider}: {type(exc).__name__}', flush=True)
+    return ''
+
+
+def _photo_queries(ep):
+    """Sólo consultas específicas; NUNCA usar categorías genéricas como respaldo."""
+    title = str(ep.get('title') or '')
     manual = str(ep.get('image_query') or '').strip()
-    title = str(ep.get('title') or '').strip()
-    category = str(ep.get('category') or '').lower()
-    terms = list(dict.fromkeys(_photo_words(title)))
-    # Palabras de contexto muy frecuentes que no describen objetos visibles.
-    generic = {'explicar', 'concreto', 'rigor', 'consecuencia', 'cambio',
-               'importante', 'causa', 'hace', 'puede', 'efecto', 'razon', 'razones'}
-    terms = [w for w in terms if w not in generic]
-    # Diccionario descriptivo, no IA de imágenes ni traducción de afirmaciones.
-    vocabulary = {
-        'emocion':'human emotion face expression', 'emociones':'human emotion',
-        'atencion':'attention focused person', 'cerebro':'human brain neuroscience',
-        'memoria':'brain memory', 'psicologia':'human psychology',
-        'sueno':'sleeping person', 'ansiedad':'person anxious', 'estres':'stress person',
-        'floracion':'flower blooming botanical', 'flor':'flower blossom',
-        'flores':'flowers blooming', 'planta':'green plant botany',
-        'plantas':'green plants', 'abeja':'bee flower',
-        'oceano':'ocean water', 'mar':'sea ocean', 'agua':'water nature',
-        'volcan':'volcano mountain', 'terremoto':'earthquake geology',
-        'luna':'moon astronomy', 'sol':'sun astronomy',
-        'estrella':'stars astronomy', 'galaxia':'galaxy space',
-        'animal':'wildlife animal', 'pulpo':'octopus underwater',
-        'perro':'dog animal', 'gato':'cat animal',
-        'historia':'historical artifacts museum', 'tecnologia':'technology electronics',
-        'bacteria':'bacteria microscope', 'insecto':'insect macro photography',
-        'corazon':'human heart anatomy', 'ojo':'human eye close up',
-        'musculo':'human muscles anatomy', 'energia':'electric energy',
-        'electricidad':'electricity power', 'bosque':'forest trees',
-    }
-    visual_terms = []
-    for word in terms:
-        if word in vocabulary:
-            visual_terms.append(vocabulary[word])
-    category_hints = {
-        'psicolog': 'person portrait expressive face emotion',
-        'ciencia': 'nature scientific photography',
-        'naturaleza': 'nature botanical wildlife photography',
-        'tecnolog': 'computer circuit electronics photography',
-        'historia': 'historical museum artifact photo',
-        'espacio': 'astronomy telescope night sky photo',
-        'animal': 'animal wildlife photograph',
-        'salud': 'human anatomy biology photograph',
-    }
-    hint = next((v for k,v in category_hints.items() if k in category), 'nature science photo')
-    queries = [manual] if manual else []
-    queries += visual_terms[:3]
-    if len(visual_terms) >= 2:
-        queries.insert(1 if manual else 0, ' '.join(visual_terms[:2]))
-    queries += [' '.join(terms[:3]), ' '.join(terms[:2]), title, hint]
-    # Consulta sencilla extra: los bancos fotográficos indexan objetos, no guiones.
-    queries += [hint.split(' photograph')[0].split(' photography')[0]]
+    narrative = ' '.join(str(ep.get(k) or '') for k in ('title', 'script', 'fact'))
+    normalized = unicodedata.normalize('NFKD', narrative.lower())
+    normalized = ''.join(c for c in normalized if not unicodedata.combining(c))
+    concepts = []
+    # 'Huella/firma digital' en navegadores no es una huella dactilar.
+    browser_context = any(x in normalized for x in ('navegador', 'browser', 'fingerprinting'))
+    for term, english in PHOTO_CONCEPTS.items():
+        if browser_context and english == 'fingerprint closeup':
+            continue
+        key = unicodedata.normalize('NFKD', term.lower())
+        key = ''.join(c for c in key if not unicodedata.combining(c))
+        if re.search(r'(?<![a-z])' + re.escape(key) + r'(?![a-z])', normalized):
+            concepts.append(english)
+    ai_query = _visual_query_ai(ep)
+    queries = [ai_query, manual] + concepts[:4]
+    # Sólo usar el título cuando incorpora elementos físicos reconocibles.
+    title_terms = [w for w in _photo_words(title) if len(w) >= 5]
+    if len(title_terms) >= 2:
+        queries.append(' '.join(title_terms[:4]))
     unique = []
-    for q in queries:
-        q = re.sub(r'\s+', ' ', q).strip()[:100]
-        if q and q.lower() not in {x.lower() for x in unique}:
-            unique.append(q)
-    return unique[:max(4, min(14, PHOTO_MAX_QUERIES))]
+    for query in queries:
+        query = re.sub(r'\s+', ' ', str(query)).strip()[:100]
+        if query and query.lower() not in {x.lower() for x in unique}:
+            unique.append(query)
+    if not unique:
+        raise RuntimeError('FOTO: el episodio carece de un objeto visual concreto; no se usará una imagen genérica')
+    return unique[:max(2, min(8, PHOTO_MAX_QUERIES))]
 
 
 def _photo_get(url, *, params=None, stream=False):
@@ -1211,9 +1234,10 @@ def _openverse_photos(query):
 
 
 def _photo_score(item, ep, query_index):
-    """La relevancia combina orden de búsqueda y coincidencia descriptiva.
+    """No aceptar fotos sólo por pertenecer al resultado de una búsqueda.
 
-    No exigir tokens idénticos español/inglés: eso excluía casi todas las fotos.
+    Wikimedia y Openverse pueden devolver imágenes irrelevantes; el título y la
+    descripción deben coincidir con los términos concretos de la consulta.
     """
     meta = ' '.join(str(item.get(x) or '') for x in ('title', 'description'))
     normalized = unicodedata.normalize('NFKD', meta.lower())
@@ -1221,11 +1245,17 @@ def _photo_score(item, ep, query_index):
     if any(re.search(r'(?<![a-z])' + re.escape(term) + r'(?![a-z])', normalized)
            for term in PHOTO_REJECT_METADATA):
         return -1
-    words = set(_photo_words(meta))
-    title_words = set(_photo_words(ep.get('title')))
-    exact_hits = len(words & title_words)
-    # La primera búsqueda es intencionalmente visual y específica.
-    return max(0, 44 - query_index * 7) + 9 * exact_hits
+    subject_query = item.get('_matched_query', '')
+    qwords = set(_photo_words(subject_query)) - PHOTO_QUERY_STOP
+    # Eliminar términos genéricos de búsqueda y pedir evidencia explícita.
+    ignored = {'human', 'person', 'people', 'natural', 'nature', 'science',
+               'technology', 'computer', 'close', 'closeup', 'background',
+               'woman', 'man', 'young', 'digital', 'electronic'}
+    focused = qwords - ignored
+    matches = set(_photo_words(meta)) & (focused if focused else qwords)
+    if not matches:
+        return -1
+    return 30 * len(matches) + 4 * len(set(_photo_words(meta)) & qwords) - query_index * 3
 
 
 def _photo_has_text(path):
@@ -1359,6 +1389,7 @@ def prepare_photo(ep, folder):
                     if item['url'] in seen:
                         continue
                     seen.add(item['url'])
+                    item['_matched_query'] = query
                     score = _photo_score(item, ep, qindex)
                     if score >= 0:
                         candidates.append((score, item))
@@ -1374,7 +1405,7 @@ def prepare_photo(ep, folder):
     chosen.unlink(missing_ok=True)
     credits = []
     print(f'FOTO: {len(candidates)} candidatas aptas por metadatos; OCR={bool(shutil.which("tesseract"))}', flush=True)
-    for score, item in candidates[:100]:
+    for score, item in candidates[:20]:
         if _download_photo(item['url'], chosen):
             credits = [dict(item, relevance_score=score, text_check='tesseract_no_text_detected')]
             break
@@ -1382,7 +1413,7 @@ def prepare_photo(ep, folder):
     (folder / 'creditos_imagenes.json').write_text(
         json.dumps(credits, ensure_ascii=False, indent=2), encoding='utf-8')
     if credits:
-        print(f'FOTO SELECCIONADA: {credits[0]["title"][:100]} ({credits[0]["provider"]})', flush=True)
+        print(f'FOTO SELECCIONADA: {credits[0]["title"][:100]} ({credits[0]["provider"]}) | consulta={credits[0].get("_matched_query")!r}', flush=True)
         return chosen, credits
     raise RuntimeError(
         'No se encontró una fotografía apta para este episodio. '
