@@ -245,10 +245,11 @@
     },
     "DV-222": {
       "reel": "publicado",
-      "updated_at": "2026-10-22T17:35:08.671696+00:00",
+      "updated_at": "2026-10-22T17:35:47.554055+00:00",
       "share_to_feed": true,
       "reel_id": "17977887852134249",
-      "story": "enviando"
+      "story": "publicado",
+      "story_id": "18106965020201697"
     }
   }
 }
