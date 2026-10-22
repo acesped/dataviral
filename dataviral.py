@@ -764,7 +764,7 @@ def _mensajes_recuperados(narration, respuestas=()):
     return validar_microfrases(valid[:5], narration['script'], narration['title'], narration['fact'], narration['lesson'])
 
 
-def _completar_mensajes_con_ia(narration, respuestas, key, models):
+def _completar_mensajes_con_ia(narration, respuestas, models, router_quota_exhausted=False):
     """Recuperación incremental: usa frases válidas y pide SOLO las faltantes.
 
     Las respuestas nuevas se validan; nunca se aceptan afirmaciones sin relación
@@ -772,7 +772,9 @@ def _completar_mensajes_con_ia(narration, respuestas, key, models):
     """
     pool = [list(x) for x in respuestas]
     attempts = 0
-    for model in models:
+    for provider, model, api_key in models:
+        if provider == 'openrouter' and router_quota_exhausted:
+            continue
         if attempts >= 8:
             break
         try:
@@ -807,8 +809,10 @@ def _completar_mensajes_con_ia(narration, respuestas, key, models):
         )
         attempts += 1
         try:
-            raw = _openrouter_text(key, model, prompt, max_tokens=550)
+            raw = _ai_request(provider, api_key, model, prompt, max_tokens=650)
         except (ValueError, RuntimeError, requests.RequestException) as exc:
+            if provider == 'openrouter' and 'Cuota gratuita de la cuenta OpenRouter agotada' in str(exc):
+                router_quota_exhausted = True
             print(f'IA complemento {attempts}: {model}: {str(exc)[:130]}', flush=True)
             continue
         lines = []
@@ -839,15 +843,67 @@ def _mensajes_parciales_respuesta(raw):
             pieces.append(match.group(2).strip().strip('"“”'))
     return pieces
 
+
+# Alternativa independiente a OpenRouter cuando la cuota gratuita se agota.
+# El modelo Gemini puede configurarse con GEMINI_MODEL.
+GEMINI_API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models/'
+
+
+def _gemini_text(key, model, prompt, *, max_tokens=1500):
+    url = GEMINI_API_ROOT + urllib.parse.quote(model, safe='') + ':generateContent'
+    response = requests.post(
+        url,
+        headers={'x-goog-api-key': key, 'Content-Type': 'application/json'},
+        json={'contents': [{'parts': [{'text': prompt}]}],
+              'generationConfig': {'maxOutputTokens': min(max_tokens, 2048), 'temperature': 0.2}},
+        timeout=110,
+    )
+    if not response.ok:
+        # Evita incluir textos externos potencialmente sensibles en el log.
+        raise ValueError(f'Gemini HTTP {response.status_code}')
+    data = response.json()
+    candidates = data.get('candidates') or []
+    parts = ((candidates[0].get('content') or {}).get('parts') or []) if candidates else []
+    text = ''.join(str(p.get('text', '')) for p in parts if isinstance(p, dict)).strip()
+    if not text:
+        raise ValueError('Gemini no devolvió texto visible')
+    return text
+
+
+def _ai_model_candidates():
+    # Priorizar Gemini: una cuota independiente de OpenRouter.
+    candidates = []
+    gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
+    if gemini_key:
+        raw = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash-lite,gemini-2.5-flash')
+        for model in list(dict.fromkeys(m.strip() for m in raw.split(',') if m.strip()))[:3]:
+            candidates.append(('gemini', model, gemini_key))
+    router_key = os.getenv('OPENROUTER_API_KEY', '').strip()
+    if router_key:
+        try:
+            candidates.extend(('openrouter', model, router_key)
+                              for model, _ in select_free_json_models(router_key, 7))
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            print(f'OpenRouter: catálogo gratuito no disponible: {type(exc).__name__}', flush=True)
+    if not candidates:
+        raise RuntimeError('Sin proveedores de IA: configura GEMINI_API_KEY u OPENROUTER_API_KEY')
+    print('Modelos candidatos: ' + ', '.join(f'{p}:{m}' for p,m,_ in candidates), flush=True)
+    return candidates
+
+
+def _ai_request(provider, key, model, prompt, max_tokens):
+    if provider == 'gemini':
+        return _gemini_text(key, model, prompt, max_tokens=max_tokens)
+    return _openrouter_text(key, model, prompt, max_tokens=max_tokens)
+
 def create_ai_episode(ep):
     """Dos etapas cortas: narración, después cinco mensajes visuales.
 
     Evita pedir un gran JSON. Solo usa modelos con prompt/completion gratuitos;
     si alguno falla por saturación o salida truncada prueba el siguiente.
     """
-    key = credential('OPENROUTER_API_KEY', TEST_OPENROUTER_API_KEY)
-    candidates = select_free_json_models(key, 7)
-    print('Modelos gratuitos disponibles: ' + ', '.join(mid for mid, _ in candidates), flush=True)
+    candidates = _ai_model_candidates()
+    router_quota_exhausted = False
     intro = (
         f"Tema: {str(ep.get('title', ''))[:140]}. "
         f"Categoría: {str(ep.get('category', ''))[:70]}. "
@@ -864,18 +920,21 @@ def create_ai_episode(ep):
     narration = None
     narration_model = None
     last_problem = 'sin respuesta'
-    for model, _ in candidates:
+    for provider, model, api_key in candidates:
+        if provider == 'openrouter' and router_quota_exhausted:
+            continue
         try:
-            raw = _openrouter_text(key, model, narration_prompt, max_tokens=2800)
+            raw = _ai_request(provider, api_key, model, narration_prompt, max_tokens=1800)
             narration = _parse_narration(raw)
-            narration_model = model
-            print(f'Narración validada con {model}', flush=True)
+            narration_model = f'{provider}:{model}'
+            print(f'Narración validada con {provider}:{model}', flush=True)
             break
-        except RuntimeError:
-            raise
-        except (ValueError, requests.RequestException, KeyError, TypeError) as exc:
-            last_problem = f'{model}: {str(exc)[:140]}'
-            print(f'OpenRouter etapa 1: {last_problem}', flush=True)
+        except (RuntimeError, ValueError, requests.RequestException, KeyError, TypeError) as exc:
+            if provider == 'openrouter' and 'Cuota gratuita de la cuenta OpenRouter agotada' in str(exc):
+                router_quota_exhausted = True
+                print('OpenRouter: cuota de cuenta agotada; se omiten sus modelos', flush=True)
+            last_problem = f'{provider}/{model}: {str(exc)[:140]}'
+            print(f'IA etapa 1: {last_problem}', flush=True)
     if narration is None:
         raise RuntimeError('Ningún modelo gratuito generó narración válida. '
                            f'Último diagnóstico: {last_problem}. No se publicó nada.')
@@ -897,22 +956,25 @@ def create_ai_episode(ep):
     # Antes de otra solicitud, no hay parámetro costoso de razonamiento forzado:
     # muchos proveedores gratuitos no lo admiten; los prompts cortos reducen consumo.
     # El modelo que completó bien la narración recibe la primera oportunidad.
-    visual_candidates = sorted(candidates, key=lambda row: row[0] != narration_model)
-    for model, _ in visual_candidates:
+    visual_candidates = sorted(candidates, key=lambda row: f'{row[0]}:{row[1]}' != narration_model)
+    for provider, model, api_key in visual_candidates:
+        if provider == 'openrouter' and router_quota_exhausted:
+            continue
         try:
-            raw = _openrouter_text(key, model, visuals_prompt, max_tokens=1900)
+            raw = _ai_request(provider, api_key, model, visuals_prompt, max_tokens=1300)
             respuestas_parciales.append(_mensajes_parciales_respuesta(raw))
             proposed = _parse_five_visuals(raw)
             visuals = validar_microfrases(proposed, narration['script'],
                                            narration['title'], narration['fact'], narration['lesson'])
-            visual_model = model
-            print(f'Cinco mensajes validados con {model}', flush=True)
+            visual_model = f'{provider}:{model}'
+            print(f'Cinco mensajes validados con {provider}:{model}', flush=True)
             break
-        except RuntimeError:
-            raise
-        except (ValueError, requests.RequestException, KeyError, TypeError) as exc:
-            last_problem = f'{model}: {str(exc)[:140]}'
-            print(f'OpenRouter etapa 2: {last_problem}', flush=True)
+        except (RuntimeError, ValueError, requests.RequestException, KeyError, TypeError) as exc:
+            if provider == 'openrouter' and 'Cuota gratuita de la cuenta OpenRouter agotada' in str(exc):
+                router_quota_exhausted = True
+                print('OpenRouter: cuota de cuenta agotada; se omiten sus modelos', flush=True)
+            last_problem = f'{provider}/{model}: {str(exc)[:140]}'
+            print(f'IA etapa 2: {last_problem}', flush=True)
     if visuals is None:
         # Evitar fallar por una segunda llamada cuando el propio guion
         # contiene cinco proposiciones breves. Nunca inventar información.
@@ -924,8 +986,8 @@ def create_ai_episode(ep):
             print(f'Recuperación inicial insuficiente ({exc}); intentando completar solo mensajes faltantes', flush=True)
             try:
                 visuals = _completar_mensajes_con_ia(
-                    narration, respuestas_parciales, key,
-                    [model for model, _ in visual_candidates]
+                    narration, respuestas_parciales, visual_candidates,
+                    router_quota_exhausted=router_quota_exhausted
                 )
                 visual_model = 'recuperacion-incremental'
                 print('Cinco mensajes recuperados y validados mediante complemento incremental', flush=True)
