@@ -189,10 +189,11 @@
     },
     "DV-268": {
       "reel": "publicado",
-      "updated_at": "2026-10-22T00:29:27.754341+00:00",
+      "updated_at": "2026-10-22T00:30:05.622306+00:00",
       "share_to_feed": true,
       "reel_id": "18143633776523788",
-      "story": "enviando"
+      "story": "publicado",
+      "story_id": "18133883776786142"
     }
   }
 }
