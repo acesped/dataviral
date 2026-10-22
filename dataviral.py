@@ -1051,7 +1051,7 @@ def palette(i):
 # Fotografía única: solo CC0 o dominio público y sin texto visible.
 # Para aceptar fotografías, el runner requiere Tesseract OCR:
 # sudo apt-get install -y tesseract-ocr
-# Si no está disponible, se emplea un fondo animado sin imagen externa.
+# Si no está disponible, se detiene el video antes de publicar.
 import shutil
 import unicodedata
 import ipaddress
@@ -1105,75 +1105,90 @@ PHOTO_CONCEPTS = {
 PHOTO_QUERY_STOP = set('photo photograph photography images image picture stock high resolution realistic creative beautiful background vertical'.split())
 
 
-def _visual_query_ai(ep):
-    """Solicita un SUJETO VISUAL concreto usando el guion final, no la categoría.
+# Consultas fotografiables, no etiquetas editoriales abstractas.
+PHOTO_PHYSICAL_SCENES = {
+    'expedicion': ['scientific expedition', 'explorers mountains', 'researchers fieldwork'],
+    'exploracion': ['explorers landscape', 'research expedition'],
+    'aventura': ['explorers mountains', 'hiking expedition'],
+    'navegador': ['laptop computer', 'computer keyboard'],
+    'huella digital': ['fingerprint', 'laptop computer'],
+    'firma invisible': ['laptop computer', 'computer mouse'],
+    'privacidad': ['laptop computer', 'closed laptop'],
+    'dinero': ['coins money', 'banknotes'],
+    'memoria': ['human brain model', 'person reading book'],
+    'psicologia': ['human facial expression', 'person thinking'],
+    'atencion': ['person reading book', 'person concentrating'],
+    'cerebro': ['human brain model'],
+    'volcan': ['volcano landscape'],
+    'abejas': ['bee flower'],
+    'oceano': ['ocean waves'],
+    'satellite': ['satellite space'],
+    'satelite': ['satellite space'],
+    'historia': ['historical artifact'],
+}
 
-    Respuesta validada; si los proveedores fallan se recurre a términos explícitos
-    del título. El resultado no se interpreta como una verificación factual.
-    """
+
+def _visual_query_ai(ep):
+    """OpenRouter ya existe en este archivo; no llamar a proveedores inexistentes."""
     if os.getenv('DV_DISABLE_VISUAL_AI', '').lower() in ('1', 'true', 'yes'):
         return ''
-    prompt = (
-        'Actúa como buscador de FOTOGRAFÍAS de Wikimedia Commons. Lee este episodio. '
-        'Responde ÚNICAMENTE con una frase de búsqueda EN INGLÉS de 2 a 5 '
-        'palabras que describa el OBJETO, PERSONA o ESCENA FÍSICA central '
-        'que represente este guion. Evita conceptos abstractos, fotografías '
-        'genéricas de ciencia, gráficos, pantallas con texto, carteles, '        'infografías y palabras como photo. No agregues explicaciones. '
-        f"TÍTULO: {str(ep.get('title',''))[:150]}. "
-        f"GUION: {str(ep.get('script',''))[:500]}. "
-        f"DATO: {str(ep.get('fact',''))[:150]}."
-    )
-    try:
-        models = _ai_candidates()
-    except Exception as exc:
-        print(f'FOTO: no se pudo consultar IA para la búsqueda: {type(exc).__name__}', flush=True)
+    key = os.getenv('OPENROUTER_API_KEY', '').strip()
+    if not key:
         return ''
-    for provider, model, key in models[:5]:
+    try:
+        candidates = select_free_json_models(key, 4)
+    except Exception as exc:
+        print(f'FOTO: catálogo de IA visual no disponible: {type(exc).__name__}', flush=True)
+        return ''
+    prompt = (
+        'Return ONLY 2 or 3 ENGLISH words for a real-world PHOTOGRAPHABLE '
+        'subject directly relevant to the main factual idea in this Spanish video. '
+        'Use a physical object, place or activity. No abstract concepts, categories, '
+        'metaphors, labels, posters, screens displaying text or explanation. '
+        f"Title: {str(ep.get('title',''))[:130]}. "
+        f"Narration: {str(ep.get('script',''))[:420]}."
+    )
+    for model, _ in candidates[:3]:
         try:
-            raw = _provider_text(provider, model, key, prompt, max_tokens=90)
-            line = raw.strip().splitlines()[0].strip(' \"\'`.:;')
-            if not re.fullmatch(r'[A-Za-z][A-Za-z0-9, -]{5,85}', line):
-                continue
-            words = [w for w in _photo_words(line) if w not in PHOTO_QUERY_STOP]
-            if 2 <= len(words) <= 7:
-                print(f'FOTO: sujeto visual del guion: {line!r}', flush=True)
+            raw = _openrouter_text(key, model, prompt, max_tokens=110)
+            line = raw.splitlines()[0].strip(' `"\'.:;,-')
+            words = line.split()
+            if (2 <= len(words) <= 4 and re.fullmatch(r'[A-Za-z0-9 -]{6,65}', line)
+                    and not any(w.lower() in PHOTO_QUERY_STOP for w in words)):
+                print(f'FOTO: búsqueda visual IA={line!r}', flush=True)
                 return line
         except Exception as exc:
-            print(f'FOTO: búsqueda visual IA falló con {provider}: {type(exc).__name__}', flush=True)
+            print(f'FOTO: consulta visual {model} no disponible: {type(exc).__name__}', flush=True)
     return ''
 
 
 def _photo_queries(ep):
-    """Sólo consultas específicas; NUNCA usar categorías genéricas como respaldo."""
+    """Consultas cortas de objetos concretos; incluye variantes sin saturar proveedores."""
     title = str(ep.get('title') or '')
     manual = str(ep.get('image_query') or '').strip()
-    narrative = ' '.join(str(ep.get(k) or '') for k in ('title', 'script', 'fact'))
+    narrative = ' '.join(str(ep.get(k) or '') for k in ('title', 'script', 'fact', 'lesson'))
     normalized = unicodedata.normalize('NFKD', narrative.lower())
-    normalized = ''.join(c for c in normalized if not unicodedata.combining(c))
-    concepts = []
-    # 'Huella/firma digital' en navegadores no es una huella dactilar.
-    browser_context = any(x in normalized for x in ('navegador', 'browser', 'fingerprinting'))
-    for term, english in PHOTO_CONCEPTS.items():
-        if browser_context and english == 'fingerprint closeup':
-            continue
-        key = unicodedata.normalize('NFKD', term.lower())
-        key = ''.join(c for c in key if not unicodedata.combining(c))
-        if re.search(r'(?<![a-z])' + re.escape(key) + r'(?![a-z])', normalized):
-            concepts.append(english)
-    ai_query = _visual_query_ai(ep)
-    queries = [ai_query, manual] + concepts[:4]
-    # Sólo usar el título cuando incorpora elementos físicos reconocibles.
-    title_terms = [w for w in _photo_words(title) if len(w) >= 5]
-    if len(title_terms) >= 2:
-        queries.append(' '.join(title_terms[:4]))
+    normalized = ''.join(ch for ch in normalized if not unicodedata.combining(ch))
+    queries = [manual, _visual_query_ai(ep)]
+    for concept, examples in PHOTO_PHYSICAL_SCENES.items():
+        if re.search(r'(?<![a-z])' + re.escape(concept) + r'(?![a-z])', normalized):
+            queries.extend(examples[:3])
+    # Si no se detecta un sujeto concreto, generar opciones con las palabras
+    # reconocibles del título, sin buscar una frase filosófica completa.
+    words = [w for w in _photo_words(title) if len(w) >= 5]
+    if len(words) >= 2:
+        queries.append(' '.join(words[:2]))
+    elif words:
+        queries.append(words[0])
     unique = []
-    for query in queries:
-        query = re.sub(r'\s+', ' ', str(query)).strip()[:100]
-        if query and query.lower() not in {x.lower() for x in unique}:
-            unique.append(query)
+    for q in queries:
+        q = re.sub(r'\s+', ' ', str(q or '')).strip()[:80]
+        if q and q.casefold() not in {old.casefold() for old in unique}:
+            unique.append(q)
     if not unique:
-        raise RuntimeError('FOTO: el episodio carece de un objeto visual concreto; no se usará una imagen genérica')
-    return unique[:max(2, min(8, PHOTO_MAX_QUERIES))]
+        raise RuntimeError('FOTO: no hay términos visuales concretos para buscar este episodio.')
+    limit = max(3, min(10, PHOTO_MAX_QUERIES))
+    return unique[:limit]
 
 
 def _photo_get(url, *, params=None, stream=False):
@@ -1196,7 +1211,7 @@ def _photo_html(value):
 
 def _commons_photos(query):
     params = dict(action='query', format='json', generator='search',
-                  gsrsearch='filetype:bitmap ' + query, gsrnamespace=6,
+                  gsrsearch=query + ' filetype:bitmap', gsrnamespace=6,
                   gsrlimit=16, prop='imageinfo', iiprop='url|extmetadata',
                   iiurlwidth=1000)
     with _photo_get('https://commons.wikimedia.org/w/api.php', params=params) as response:
