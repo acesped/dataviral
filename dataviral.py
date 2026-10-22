@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DataViral: catálogo integrado (500 propuestas), previews y publicación de VIDEO en Reels y feed de IG.
+"""DataViral: 500 propuestas, Reels/feed/Stories; edición de retención y fondo monocromático.
 
 Las referencias son opcionales; la ausencia de fuentes no impide publicar.
 Los datos generados por IA no están verificados independientemente.
@@ -953,11 +953,11 @@ def create_ai_episode(ep):
         f"Enseñanza deseada: {str(ep.get('lesson', ''))[:160]}."
     )
     narration_prompt = (
-        'Redacta un guion educativo sorprendente pero preciso, IDEALMENTE 42 A 50 PALABRAS '
-        'en español para narrar en 20 segundos. Escribe de cuatro a seis oraciones completas ' 
-        'con ideas concretas; deben avanzar de causa a conclusión y ser comprensibles ' 
+        'Redacta un guion educativo sorprendente y preciso, IDEALMENTE 42 A 50 PALABRAS '
+        'en español para narrar en 20 segundos. Abre con un gancho factual de 5 a 10 palabras, ' 
+        'que despierte una pregunta o contradiga una intuición, sin sensacionalismo. Escribe de cuatro a seis oraciones completas con ideas concretas; deben avanzar de causa a conclusión y ser comprensibles ' 
         'por sí solas. Sin cifras inventadas, sin introducciones vacías, '
-        'sin consejos médicos o de emergencia no verificados. Responde SOLO cuatro líneas, '
+        'sin consejos médicos o de emergencia no verificados, ni promesas exageradas. Cierra con un aprendizaje claro y memorable. Responde SOLO cuatro líneas, '
         'sin Markdown: TITULO: ...\nGUION: ...\nDATO: ...\nLECCION: ...\n' + intro
     )
     narration = None
@@ -987,7 +987,7 @@ def create_ai_episode(ep):
         'Basándote ÚNICAMENTE en el guion siguiente, escribe cinco frases educativas '
         'completas para cinco escenas consecutivas. Cada una entre 3 y 9 palabras, '
         'máximo 52 caracteres, sin títulos vacíos, sin puntos suspensivos, sin introducir '
-        'hechos ajenos al guion. Deben explicar cinco aspectos o consecuencias distintas. '
+        'hechos ajenos al guion. MENSAJE_1 debe ser un gancho concreto y fiel al guion; MENSAJE_5 debe cerrar el aprendizaje sin inventar nada. Deben explicar cinco aspectos o consecuencias distintas. '
         'Responde SOLO estas cinco líneas, sin Markdown ni explicaciones: '
         'MENSAJE_1: ...\nMENSAJE_2: ...\nMENSAJE_3: ...\nMENSAJE_4: ...\nMENSAJE_5: ...\n'
         f"TITULO: {narration['title']}\nGUION: {narration['script']}\n"
@@ -1050,7 +1050,7 @@ def create_ai_episode(ep):
         visual_ai_model=visual_model, generated_at=now(), verified=False,
         verification_note='Contenido generado con IA, no verificado independientemente',
     )
-    print(f"Guion OpenRouter creado: {ep['id']}; textos cortos: 5; fuentes propuestas: ninguna", flush=True)
+    print(f"Guion IA creado: {ep['id']}; textos cortos: 5; fuentes propuestas: ninguna", flush=True)
     return result
 
 def select_episode(episodes, gh=None, requested=None):
@@ -1652,13 +1652,24 @@ def render(ep, out: Path, require_voice=False):
             raise RuntimeError(f'Narración obligatoria falló: {exc}') from exc
         print(f'AVISO: preview sin voz por: {exc}', file=sys.stderr)
     args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y']
+    motion = os.getenv('DV_SUBTLE_ZOOM', 'true').strip().lower() in ('1','true','yes','on')
     for frame in frames:
-        args += ['-loop', '1', '-framerate', '12', '-t', '4', '-i', str(frame)]
+        args += ['-loop', '1', '-framerate', '30', '-t', '4', '-i', str(frame)]
     args += ['-i', str(ambient_path)]
     voice_available = narration.exists() and narration.stat().st_size > 500
     if voice_available:
         args += ['-i', str(narration)]
-    video_filters = ''.join(f'[{i}:v]fps=12,scale=720:1280,setsar=1[v{i}];' for i in range(5))
+    # Zoom muy leve (hasta ~6%) sobre la MISMA foto; los textos no cambian de tamaño perceptiblemente.
+    # d=1 genera un fotograma por fotograma de entrada; 30 fps x 4 s por escena.
+    if motion:
+        video_filters = ''.join(
+            f"[{i}:v]zoompan=z='min(zoom+0.0005,1.06)':"
+            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"d=1:s=720x1280:fps=30,setsar=1[v{i}];"
+            for i in range(5)
+        )
+    else:
+        video_filters = ''.join(f'[{i}:v]fps=30,scale=720:1280,setsar=1[v{i}];' for i in range(5))
     video_filters += ''.join(f'[v{i}]' for i in range(5)) + 'concat=n=5:v=1:a=0[v];'
     if voice_available:
         video_filters += '[5:a]volume=0.28[amb];[6:a]volume=1.4[voice];[amb][voice]amix=inputs=2:duration=first:dropout_transition=0[a]'
@@ -1672,6 +1683,7 @@ def render(ep, out: Path, require_voice=False):
     subprocess.run(args, check=True, timeout=240)
     print(f'Video: {movie} ({movie.stat().st_size:,} bytes)')
     print(f'Portada: {cover}')
+    print(f'Edición DATO WOW: mismo fondo B/N, sin círculos, zoom suave={motion}, 5 escenas de 4 segundos', flush=True)
     return movie, cover
 
 
@@ -1862,7 +1874,7 @@ def publish(ep, movie, cover, approval):
     caption = f'{ep["title"]}\n\n{ep["lesson"]}'
     if ep.get('source'):
         caption += f'\n\nReferencias sugeridas (no verificadas): {ep["source"]}'
-    caption += '\n\n#DatoWow #AprendeAlgoNuevo'
+    caption += '\n\n¿Qué parte te sorprendió más? Cuéntanos en comentarios.\n\n#DatoWow #AprendeAlgoNuevo'
     state['episodes'][ep['id']] = row
     row['reel'] = 'enviando'
     row['updated_at'] = now()
@@ -1931,7 +1943,16 @@ def main():
     out.mkdir(exist_ok=True,parents=True)
     (out/f"{ep['id']}-guion.json").write_text(
         json.dumps(generated,ensure_ascii=False,indent=2),encoding='utf-8')
-    print(f"Guion OpenRouter creado: {ep['id']}; referencias propuestas: {generated['source'] or 'ninguna'}")
+    print(f"Guion generado: {ep['id']}; referencias propuestas: {generated['source'] or 'ninguna'}")
+    (out/f"{ep['id']}-experimento.json").write_text(
+        json.dumps({
+            'episode_id': ep['id'], 'category': ep.get('category'),
+            'creative_variant': 'hook_mono_subtle_zoom_v1',
+            'hook_visual': generated['visuals'][0],
+            'duration_seconds': 20, 'scene_count': 5,
+            'metrics': None,
+            'note': 'Etiquetas de creatividad; las métricas reales requieren consulta posterior a Insights.'
+        }, ensure_ascii=False, indent=2), encoding='utf-8')
     if args.publish and not generated.get('source'):
         print('AVISO: el guion no tiene fuentes; se permite publicar, pero no existe verificación independiente.', flush=True)
     movie,cover=render(generated,out,require_voice=args.publish)
