@@ -844,9 +844,46 @@ def _mensajes_parciales_respuesta(raw):
     return pieces
 
 
-# Alternativa independiente a OpenRouter cuando la cuota gratuita se agota.
-# El modelo Gemini puede configurarse con GEMINI_MODEL.
+# Descubrir modelos desde la API de Gemini, en vez de asumir IDs disponibles.
 GEMINI_API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models/'
+
+
+def _discover_gemini_models(key):
+    """Selecciona únicamente modelos que la clave actual puede usar para generateContent."""
+    discovered = []
+    token = None
+    for _ in range(6):
+        params = {'pageSize': 100}
+        if token:
+            params['pageToken'] = token
+        response = requests.get(
+            'https://generativelanguage.googleapis.com/v1beta/models',
+            headers={'x-goog-api-key': key}, params=params, timeout=35,
+        )
+        if not response.ok:
+            raise RuntimeError(f'Gemini models.list HTTP {response.status_code}; verificar clave y API habilitada')
+        obj = response.json()
+        for row in obj.get('models', []):
+            mid = str(row.get('name', '')).removeprefix('models/')
+            methods = row.get('supportedGenerationMethods') or []
+            if ('generateContent' in methods and mid.startswith('gemini-')
+                    and not any(x in mid.lower() for x in ('image','audio','tts','embedding','live','robotics'))):
+                discovered.append(mid)
+        token = obj.get('nextPageToken')
+        if not token:
+            break
+    # Preferir variantes Flash-Lite y Flash; no activar modelos Pro por defecto.
+    preferred = [m for m in discovered if 'flash-lite' in m.lower() and 'preview' not in m.lower()]
+    preferred += [m for m in discovered if 'flash' in m.lower() and 'lite' not in m.lower() and 'preview' not in m.lower()]
+    preferred += [m for m in discovered if 'flash' in m.lower() and m not in preferred]
+    requested = [x.strip().removeprefix('models/') for x in os.getenv('GEMINI_MODEL', '').split(',') if x.strip()]
+    chosen = [m for m in requested if m in discovered]
+    chosen += [m for m in preferred if m not in chosen]
+    models = list(dict.fromkeys(chosen))[:5]
+    print('Gemini: modelos habilitados para generateContent: ' + (', '.join(models) or 'ninguno'), flush=True)
+    if not models:
+        raise RuntimeError('Gemini no muestra modelos Flash accesibles para esta clave')
+    return models
 
 
 def _gemini_text(key, model, prompt, *, max_tokens=1500):
@@ -859,25 +896,30 @@ def _gemini_text(key, model, prompt, *, max_tokens=1500):
         timeout=110,
     )
     if not response.ok:
-        # Evita incluir textos externos potencialmente sensibles en el log.
-        raise ValueError(f'Gemini HTTP {response.status_code}')
+        try:
+            err = response.json().get('error') or {}
+            detail = re.sub(r'\s+', ' ', str(err.get('message', '')))[:210]
+        except (ValueError, TypeError, AttributeError):
+            detail = ''
+        raise ValueError(f'Gemini {model}: HTTP {response.status_code}; {detail}')
     data = response.json()
-    candidates = data.get('candidates') or []
-    parts = ((candidates[0].get('content') or {}).get('parts') or []) if candidates else []
-    text = ''.join(str(p.get('text', '')) for p in parts if isinstance(p, dict)).strip()
-    if not text:
+    choices = data.get('candidates') or []
+    parts = ((choices[0].get('content') or {}).get('parts') or []) if choices else []
+    result = ''.join(str(p.get('text', '')) for p in parts if isinstance(p, dict)).strip()
+    if not result:
         raise ValueError('Gemini no devolvió texto visible')
-    return text
+    return result
 
 
 def _ai_model_candidates():
-    # Priorizar Gemini: una cuota independiente de OpenRouter.
     candidates = []
     gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
     if gemini_key:
-        raw = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash-lite,gemini-2.5-flash')
-        for model in list(dict.fromkeys(m.strip() for m in raw.split(',') if m.strip()))[:3]:
-            candidates.append(('gemini', model, gemini_key))
+        try:
+            candidates.extend(('gemini', model, gemini_key)
+                              for model in _discover_gemini_models(gemini_key))
+        except (requests.RequestException, RuntimeError, ValueError) as exc:
+            print(f'Gemini: descubrimiento fallido: {str(exc)[:220]}', flush=True)
     router_key = os.getenv('OPENROUTER_API_KEY', '').strip()
     if router_key:
         try:
@@ -886,7 +928,7 @@ def _ai_model_candidates():
         except (requests.RequestException, ValueError, RuntimeError) as exc:
             print(f'OpenRouter: catálogo gratuito no disponible: {type(exc).__name__}', flush=True)
     if not candidates:
-        raise RuntimeError('Sin proveedores de IA: configura GEMINI_API_KEY u OPENROUTER_API_KEY')
+        raise RuntimeError('Ningún modelo disponible: revisar acceso de Gemini o cuota de OpenRouter.')
     print('Modelos candidatos: ' + ', '.join(f'{p}:{m}' for p,m,_ in candidates), flush=True)
     return candidates
 
@@ -895,6 +937,7 @@ def _ai_request(provider, key, model, prompt, max_tokens):
     if provider == 'gemini':
         return _gemini_text(key, model, prompt, max_tokens=max_tokens)
     return _openrouter_text(key, model, prompt, max_tokens=max_tokens)
+
 
 def create_ai_episode(ep):
     """Dos etapas cortas: narración, después cinco mensajes visuales.
@@ -1878,4 +1921,3 @@ def main():
 
 if __name__=='__main__':
     sys.exit(main())
- 
