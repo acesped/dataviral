@@ -205,10 +205,11 @@
     },
     "DV-464": {
       "reel": "publicado",
-      "updated_at": "2026-10-22T01:18:24.978423+00:00",
+      "updated_at": "2026-10-22T01:19:01.742101+00:00",
       "share_to_feed": true,
       "reel_id": "18097386434397915",
-      "story": "enviando"
+      "story": "publicado",
+      "story_id": "18141287383623041"
     }
   }
 }
