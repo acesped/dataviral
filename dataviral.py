@@ -1234,66 +1234,91 @@ PHOTO_PHYSICAL_SCENES = {
 
 
 def _visual_query_ai(ep):
-    """OpenRouter ya existe en este archivo; no llamar a proveedores inexistentes."""
+    """Gemini propone sujetos fotografiables, no conceptos abstractos.
+
+    No depende de OpenRouter (que puede estar sin cuota). La salida se limita
+    a consultas cortas y se valida antes de consultar buscadores de imágenes.
+    """
     if os.getenv('DV_DISABLE_VISUAL_AI', '').lower() in ('1', 'true', 'yes'):
-        return ''
-    key = os.getenv('OPENROUTER_API_KEY', '').strip()
+        return []
+    key = os.getenv('GEMINI_API_KEY', '').strip()
     if not key:
-        return ''
-    try:
-        candidates = select_free_json_models(key, 4)
-    except Exception as exc:
-        print(f'FOTO: catálogo de IA visual no disponible: {type(exc).__name__}', flush=True)
-        return ''
+        print('FOTO: Gemini no configurado; se usarán consultas locales', flush=True)
+        return []
     prompt = (
-        'Return ONLY 2 or 3 ENGLISH words for a real-world PHOTOGRAPHABLE '
-        'subject directly relevant to the main factual idea in this Spanish video. '
-        'Use a physical object, place or activity. No abstract concepts, categories, '
-        'metaphors, labels, posters, screens displaying text or explanation. '
-        f"Title: {str(ep.get('title',''))[:130]}. "
-        f"Narration: {str(ep.get('script',''))[:420]}."
+        'Eres un documentalista que busca fotografías CC0. A partir del tema '
+        'y guion en español, responde SOLO un JSON válido como '
+        '{"queries":["english object or activity","second photo subject",'
+        '"third photo subject"]}. Cada consulta EN INGLÉS con 2 a 4 '
+        'palabras y sustantivos físicos fotografiables. Deben representar '
+        'el fenómeno CONCRETO explicado, no su categoría ni una metáfora. '
+        'Evita pantallas con letras, carteles, logos, diagramas e infografías. '
+        'Ejemplo: si el tema es comparar ejercicios de fuerza y resistencia, '
+        'usa "person lifting weights", "runner training outdoors", '
+        '"athlete exercising gym"; nunca "training versus". '
+        f"Tema: {str(ep.get('title',''))[:140]}\n"
+        f"Guion: {str(ep.get('script',''))[:600]}\n"
+        f"Dato: {str(ep.get('fact',''))[:150]}"
     )
-    for model, _ in candidates[:3]:
+    # El alias -latest se comprobó en ejecuciones previas, pero el modelo puede cambiar.
+    preferred = ['gemini-flash-lite-latest', 'gemini-3.1-flash-lite', 'gemini-3.5-flash-lite']
+    configured = [x.strip() for x in os.getenv('DV_IMAGE_GEMINI_MODELS','').split(',') if x.strip()]
+    for model in list(dict.fromkeys(configured + preferred)):
         try:
-            raw = _openrouter_text(key, model, prompt, max_tokens=110)
-            line = raw.splitlines()[0].strip(' `"\'.:;,-')
-            words = line.split()
-            if (2 <= len(words) <= 4 and re.fullmatch(r'[A-Za-z0-9 -]{6,65}', line)
-                    and not any(w.lower() in PHOTO_QUERY_STOP for w in words)):
-                print(f'FOTO: búsqueda visual IA={line!r}', flush=True)
-                return line
-        except Exception as exc:
-            print(f'FOTO: consulta visual {model} no disponible: {type(exc).__name__}', flush=True)
-    return ''
+            raw = _gemini_text(key, model, prompt, max_tokens=400)
+            obj = _parse_ai_json(raw)
+            lines = obj.get('queries') or []
+            if not isinstance(lines, list):
+                raise ValueError('queries no es lista')
+            valid = []
+            for q in lines:
+                if not isinstance(q, str):
+                    continue
+                q = re.sub(r'\s+', ' ', q).strip(' .,!?:;')
+                if (2 <= len(q.split()) <= 5 and len(q) <= 70
+                        and re.fullmatch(r'[A-Za-z0-9 -]+', q)
+                        and not any(w.lower() in PHOTO_QUERY_STOP for w in q.split())):
+                    valid.append(q)
+            if valid:
+                print(f'FOTO: Gemini sugirió {valid!r}', flush=True)
+                return valid[:4]
+        except (ValueError, RuntimeError, requests.RequestException) as exc:
+            print(f'FOTO: Gemini {model} no pudo proponer consultas: {str(exc)[:130]}', flush=True)
+    return []
 
 
 def _photo_queries(ep):
-    """Consultas cortas de objetos concretos; incluye variantes sin saturar proveedores."""
-    title = str(ep.get('title') or '')
+    """Varias consultas concretas, primero IA Gemini y después sujetos locales."""
     manual = str(ep.get('image_query') or '').strip()
+    title = str(ep.get('title') or '')
     narrative = ' '.join(str(ep.get(k) or '') for k in ('title', 'script', 'fact', 'lesson'))
     normalized = unicodedata.normalize('NFKD', narrative.lower())
     normalized = ''.join(ch for ch in normalized if not unicodedata.combining(ch))
-    queries = [manual, _visual_query_ai(ep)]
+    queries = []
+    if manual:
+        queries.append(manual)
+    queries.extend(_visual_query_ai(ep))
     for concept, examples in PHOTO_PHYSICAL_SCENES.items():
         if re.search(r'(?<![a-z])' + re.escape(concept) + r'(?![a-z])', normalized):
-            queries.extend(examples[:3])
-    # Si no se detecta un sujeto concreto, generar opciones con las palabras
-    # reconocibles del título, sin buscar una frase filosófica completa.
-    words = [w for w in _photo_words(title) if len(w) >= 5]
-    if len(words) >= 2:
-        queries.append(' '.join(words[:2]))
-    elif words:
-        queries.append(words[0])
-    unique = []
+            queries.extend(examples)
+    # Respaldo específico para temas que antes daban «entrenamiento versus».
+    if any(word in normalized for word in ('entrenamiento', 'entrenar', 'ejercicio', 'fuerza', 'resistencia')):
+        if any(word in normalized for word in ('dinero', 'finanzas', 'inversion', 'mercado', 'econom')):
+            queries.extend(['financial analyst laptop', 'person using calculator'])
+        else:
+            queries.extend(['athlete exercising gym', 'person lifting weights', 'runner training outdoors'])
+    if any(word in normalized for word in ('expedicion', 'exploracion', 'explorador')):
+        queries.extend(['scientific expedition outdoors', 'explorers mountains'])
+    # No usar por defecto fragmentos abstractos del título como «X versus».
+    unique, seen = [], set()
     for q in queries:
         q = re.sub(r'\s+', ' ', str(q or '')).strip()[:80]
-        if q and q.casefold() not in {old.casefold() for old in unique}:
+        if q and q.casefold() not in seen:
             unique.append(q)
+            seen.add(q.casefold())
     if not unique:
-        raise RuntimeError('FOTO: no hay términos visuales concretos para buscar este episodio.')
-    limit = max(3, min(10, PHOTO_MAX_QUERIES))
-    return unique[:limit]
+        raise RuntimeError('FOTO: no se obtuvo un sujeto físico concreto para el tema; no se usará una foto genérica.')
+    return unique[:max(3, min(12, PHOTO_MAX_QUERIES))]
 
 
 def _photo_get(url, *, params=None, stream=False):
