@@ -1054,10 +1054,12 @@ def palette(i):
 # Si no está disponible, se emplea un fondo animado sin imagen externa.
 import shutil
 import unicodedata
+import ipaddress
+import socket
 from PIL import ImageOps, ImageEnhance, ImageFilter
 
 PHOTO_HEADERS = {
-    'User-Agent': 'DatoWowEducationalBot/1.4 (https://github.com/acesped/dataviral)',
+    'User-Agent': 'DatoWowEducationalBot/1.5 (https://github.com/acesped/dataviral)',
     'Accept': 'application/json, image/jpeg, image/png, image/webp',
 }
 PHOTO_REJECT_METADATA = (
@@ -1076,7 +1078,7 @@ PHOTO_STOP = {
     'todo','todos','ellas','ellos','del','las','los','con','una','que',
 }
 PHOTO_MIN_SCORE = int(os.getenv('DV_IMAGE_MIN_SCORE', '7'))
-PHOTO_MAX_QUERIES = int(os.getenv('DV_IMAGE_MAX_QUERIES', '9'))
+PHOTO_MAX_QUERIES = int(os.getenv('DV_IMAGE_MAX_QUERIES', '10'))
 
 
 def _photo_words(value):
@@ -1141,12 +1143,14 @@ def _photo_queries(ep):
     if len(visual_terms) >= 2:
         queries.insert(1 if manual else 0, ' '.join(visual_terms[:2]))
     queries += [' '.join(terms[:3]), ' '.join(terms[:2]), title, hint]
+    # Consulta sencilla extra: los bancos fotográficos indexan objetos, no guiones.
+    queries += [hint.split(' photograph')[0].split(' photography')[0]]
     unique = []
     for q in queries:
         q = re.sub(r'\s+', ' ', q).strip()[:100]
         if q and q.lower() not in {x.lower() for x in unique}:
             unique.append(q)
-    return unique[:max(4, min(12, PHOTO_MAX_QUERIES))]
+    return unique[:max(4, min(14, PHOTO_MAX_QUERIES))]
 
 
 def _photo_get(url, *, params=None, stream=False):
@@ -1254,48 +1258,95 @@ def _photo_has_text(path):
     return False
 
 
-def _download_photo(url, target):
+def _public_photo_url(url):
+    """Bloquea URLs no HTTPS, credenciales, puertos raros y direcciones internas.
+
+    Openverse devuelve fotos alojadas en muchos dominios legítimos. La antigua
+    lista cerrada descartaba casi todas las imágenes sin siquiera descargarlas.
+    """
     from urllib.parse import urlparse
     parsed = urlparse(url)
-    if parsed.scheme != 'https' or parsed.hostname not in (
-        'upload.wikimedia.org', 'commons.wikimedia.org',
-        'images.openverse.org', 'live.staticflickr.com',
-        'farm66.staticflickr.com', 'farm1.staticflickr.com',
-        'images.unsplash.com', 'cdn.pixabay.com', 'www.publicdomainpictures.net',
-        'images.pexels.com', 'staticflickr.com', 'upload.wikimedia.org'
-    ):
-        # No acceder a hosts arbitrarios desde un workflow con secretos.
+    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
         return False
     try:
-        with _photo_get(url, stream=True) as response:
-            if not any(t in response.headers.get('Content-Type', '').lower()
-                       for t in ('image/jpeg', 'image/png', 'image/webp')):
-                return False
-            raw = bytearray()
-            for chunk in response.iter_content(65536):
-                raw.extend(chunk)
-                if len(raw) > 10_000_000:
-                    return False
-        with Image.open(io.BytesIO(raw)) as original:
-            if original.width < 600 or original.height < 480:
-                return False
-            original = ImageOps.exif_transpose(original).convert('RGB')
-            original.thumbnail((1500, 1500))
-            original.save(target, 'JPEG', quality=88)
-        if _photo_has_text(target):
-            target.unlink(missing_ok=True)
+        if parsed.port not in (None, 443):
             return False
-        return True
-    except Exception as exc:
-        print(f'Imagen no apta: {type(exc).__name__}: {str(exc)[:100]}', flush=True)
-        target.unlink(missing_ok=True)
+    except ValueError:
         return False
+    host = parsed.hostname.lower().rstrip('.')
+    if host == 'localhost' or host.endswith(('.local', '.internal', '.localhost')):
+        return False
+    try:
+        addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        if not addresses:
+            return False
+        for address in addresses:
+            ip = ipaddress.ip_address(address[4][0])
+            if not ip.is_global:
+                return False
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _download_photo(url, target):
+    """Descarga fotos de dominios HTTPS públicos, incluidos los de Openverse.
+
+    Valida cada redirección. Mantiene el límite de 10 MB y el filtro OCR.
+    """
+    try:
+        if not _public_photo_url(url):
+            print('FOTO DESCARTADA: URL no pública o dominio no resoluble', flush=True)
+            return False
+        current = url
+        for _ in range(6):
+            with requests.get(current, headers=PHOTO_HEADERS,
+                              timeout=(10, 28), stream=True,
+                              allow_redirects=False) as response:
+                if response.status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get('Location', '')
+                    next_url = urllib.parse.urljoin(current, location)
+                    if not location or not _public_photo_url(next_url):
+                        print('FOTO DESCARTADA: redirección insegura', flush=True)
+                        return False
+                    current = next_url
+                    continue
+                response.raise_for_status()
+                mime = response.headers.get('Content-Type', '').lower()
+                if not any(kind in mime for kind in ('image/jpeg', 'image/png', 'image/webp')):
+                    print(f'FOTO DESCARTADA: tipo MIME {mime[:55]}', flush=True)
+                    return False
+                payload = bytearray()
+                for chunk in response.iter_content(65536):
+                    if chunk:
+                        payload.extend(chunk)
+                    if len(payload) > 10_000_000:
+                        print('FOTO DESCARTADA: tamaño superior a 10 MB', flush=True)
+                        return False
+                with Image.open(io.BytesIO(payload)) as image:
+                    if image.width < 480 or image.height < 360:
+                        print('FOTO DESCARTADA: resolución insuficiente', flush=True)
+                        return False
+                    image = ImageOps.exif_transpose(image).convert('RGB')
+                    image.thumbnail((1600, 1600))
+                    image.save(target, 'JPEG', quality=89)
+                if _photo_has_text(target):
+                    target.unlink(missing_ok=True)
+                    return False
+                return True
+        print('FOTO DESCARTADA: demasiadas redirecciones', flush=True)
+    except Exception as exc:
+        print(f'FOTO DESCARTADA: {type(exc).__name__}: {str(exc)[:180]}', flush=True)
+    target.unlink(missing_ok=True)
+    return False
 
 
 def prepare_photo(ep, folder):
     """Selecciona una sola foto aprobada para las cinco escenas."""
     queries = _photo_queries(ep)
     print(f'FOTO: búsquedas del episodio {ep["id"]}: {queries}', flush=True)
+    if not shutil.which('tesseract'):
+        raise RuntimeError('No está instalado tesseract-ocr. Instálalo en GitHub Actions para habilitar fotografías sin texto.')
     candidates, seen = [], set()
     stats = {'resultados': 0, 'metadatos_rechazados': 0,
              'descargas_fallidas_o_texto': 0, 'proveedores_fallidos': 0}
@@ -1323,7 +1374,7 @@ def prepare_photo(ep, folder):
     chosen.unlink(missing_ok=True)
     credits = []
     print(f'FOTO: {len(candidates)} candidatas aptas por metadatos; OCR={bool(shutil.which("tesseract"))}', flush=True)
-    for score, item in candidates[:60]:
+    for score, item in candidates[:100]:
         if _download_photo(item['url'], chosen):
             credits = [dict(item, relevance_score=score, text_check='tesseract_no_text_detected')]
             break
@@ -1333,26 +1384,25 @@ def prepare_photo(ep, folder):
     if credits:
         print(f'FOTO SELECCIONADA: {credits[0]["title"][:100]} ({credits[0]["provider"]})', flush=True)
         return chosen, credits
-    print(f'FOTO NO DISPONIBLE: {stats}. Usando fondo de respaldo. '
-          'Comprueba tesseract-ocr, respuestas de Wikimedia/Openverse y hosts de descarga.', flush=True)
-    return None, []
+    raise RuntimeError(
+        'No se encontró una fotografía apta para este episodio. '
+        f'Diagnóstico: {stats}; candidatas={len(candidates)}. '
+        'Se cancela el video para evitar publicar fondos de colores sin foto. '
+        'Consulta los mensajes FOTO DESCARTADA y FOTO: error anteriores.'
+    )
 
 
 def scene(ep, number, dest, photo=None):
     W, H = 720, 1280
     bg, accent = palette(number + int(ep['id'][-3:]))
+    if photo is None or not Path(photo).is_file():
+        raise RuntimeError('No hay fotografía de fondo: se prohíbe crear escenas con fondos planos.')
     if photo is not None:
         with Image.open(photo) as source:
             img = ImageOps.fit(source.convert('RGB'), (W, H), method=Image.Resampling.LANCZOS)
         img = ImageEnhance.Brightness(img).enhance(.63)
-    else:
-        img = Image.new('RGB', (W, H), bg)
     d = ImageDraw.Draw(img, 'RGBA')
-    rng = random.Random(ep['id'] + str(number))
-    for _ in range(0 if photo else 22):
-        x, y = rng.randrange(-150, 800), rng.randrange(-150, 1400)
-        r = rng.randrange(15, 145)
-        d.ellipse((x-r, y-r, x+r, y+r), outline=(*accent, rng.randrange(22, 90)), width=rng.randrange(2, 8))
+    # Sin círculos decorativos: la imagen fotográfica permanece limpia.
     d.rounded_rectangle((52, 72, 668, 152), 24, fill=(255, 255, 255, 18), outline=(*accent, 200), width=3)
     d.text((77, 91), 'DATO_WOW', font=font(33, True), fill=(255, 255, 255))
     d.text((55, 187), ep['category'].upper(), font=font(19, True), fill=accent)
@@ -1399,6 +1449,8 @@ def render(ep, out: Path, require_voice=False):
     folder = out / ep['id']
     folder.mkdir(parents=True, exist_ok=True)
     shared_photo, image_credits = prepare_photo(ep, folder)
+    if shared_photo is None:
+        raise RuntimeError('El video requiere una fotografía de fondo; cancelado.')
     ep['image_credits'] = image_credits
     frames = []
     for i in range(5):
