@@ -261,10 +261,11 @@
     },
     "DV-185": {
       "reel": "publicado",
-      "updated_at": "2026-10-23T03:01:58.850502+00:00",
+      "updated_at": "2026-10-23T03:03:04.876282+00:00",
       "share_to_feed": true,
       "reel_id": "18107930951347235",
-      "story": "enviando"
+      "story": "publicado",
+      "story_id": "18089586284274843"
     }
   }
 }
