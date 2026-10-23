@@ -277,10 +277,11 @@
     },
     "DV-401": {
       "reel": "publicado",
-      "updated_at": "2026-10-23T21:03:38.274019+00:00",
+      "updated_at": "2026-10-23T21:04:15.002904+00:00",
       "share_to_feed": true,
       "reel_id": "18108350147253599",
-      "story": "enviando"
+      "story": "publicado",
+      "story_id": "18114903806609751"
     }
   }
 }
