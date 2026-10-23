@@ -269,10 +269,11 @@
     },
     "DV-343": {
       "reel": "publicado",
-      "updated_at": "2026-10-23T09:02:47.074288+00:00",
+      "updated_at": "2026-10-23T09:04:13.683583+00:00",
       "share_to_feed": true,
       "reel_id": "17951228262338227",
-      "story": "enviando"
+      "story": "publicado",
+      "story_id": "18024492380866581"
     }
   }
 }
