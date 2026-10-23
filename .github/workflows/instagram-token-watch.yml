@@ -2,14 +2,8 @@ name: DATO WOW - Vigilar y renovar token Instagram
 
 on:
   workflow_dispatch:
-    inputs:
-      renovar_ahora:
-        description: 'Intentar renovación inmediata (token long-lived válido, >24h)'
-        required: false
-        type: boolean
-        default: false
   schedule:
-    # Comprobación diaria. Los lunes también intenta la renovación.
+    # Comprobación e intento de renovación todos los días.
     - cron: '18 11 * * *'
 
 permissions:
@@ -44,17 +38,8 @@ jobs:
           IG_EXPECTED_USERNAME: dato_wow_
           IG_SECRET_MANAGER_TOKEN: ${{ secrets.IG_SECRET_MANAGER_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          RUN_EVENT: ${{ github.event_name }}
-          FORCE_REFRESH: ${{ inputs.renovar_ahora || false }}
         shell: bash
         run: |
           set -euo pipefail
-          args=()
-          # Los lunes hay renovación programada; los demás días solo validación.
-          if [[ "$RUN_EVENT" == "schedule" && "$(date -u +%u)" == "1" ]]; then
-            args+=(--refresh)
-          fi
-          if [[ "$RUN_EVENT" == "workflow_dispatch" && "$FORCE_REFRESH" == "true" ]]; then
-            args+=(--refresh)
-          fi
-          python scripts/refresh_instagram_token.py "${args[@]}"
+          # En cada ejecución automática o manual, validar e intentar renovar.
+          python scripts/refresh_instagram_token.py --refresh
