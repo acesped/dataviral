@@ -2,7 +2,7 @@
 """DATO WOW: valida token Instagram y renueva tokens long-lived válidos.
 
 Requiere: requests, PyNaCl. No puede recuperar un token revocado/expirado.
-Actualizar IG_TOKEN solo después de comprobar la nueva credencial.
+Actualizar INSTAGRAM_TOKEN solo después de comprobar la nueva credencial.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from nacl import public, encoding
 IG_ROOT = "https://graph.instagram.com"
 GH_ROOT = "https://api.github.com"
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "DatoWow-InstagramTokenWatch/1.0"})
+SESSION.headers.update({"User-Agent": "DatoWow-InstagramTokenWatch/2.0"})
 TIMEOUT = 25
 
 
@@ -92,7 +92,8 @@ def summary(message):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--refresh", action="store_true", help="Renovar ahora si se permite")
+    parser.add_argument("--refresh", action="store_true",
+                        help="Intentar renovación preventiva del token vigente")
     args = parser.parse_args()
 
     token = require("INSTAGRAM_TOKEN")
@@ -109,9 +110,18 @@ def main():
     try:
         obj = ig_call("refresh_access_token", token, grant_type="ig_refresh_token")
     except RuntimeError as exc:
-        summary("⚠️ Renovación de Instagram no completada. Revisar el registro (token actual no modificado).")
-        raise RuntimeError("No se pudo renovar. El token actual sigue almacenado sin cambios. "
-                           "Comprueba que usa Instagram Login, es long-lived y tiene al menos 24 horas. " + str(exc)) from exc
+        # El token recién renovado puede no reunir todavía las 24 horas
+        # mínimas; no convertir esa condición específica en una alarma falsa.
+        detail = str(exc)
+        if "code=190" not in detail and "code=?" not in detail and (
+            "24 hour" in detail.lower() or "24 horas" in detail.lower()
+        ):
+            log("Instagram: renovación aún no habilitada (edad mínima de 24 horas).")
+            summary("ℹ️ Token válido; renovación aplazada por edad mínima de Meta.")
+            return 0
+        summary("⚠️ Renovación no completada; el secreto actual no se modificó.")
+        raise RuntimeError("No se pudo renovar. Token almacenado sin cambios. "
+                           "Si está revocado o caducado, necesita reautorización. " + detail) from exc
     updated = str(obj.get("access_token", "")).strip()
     if not updated:
         raise RuntimeError("Renovación sin access_token; secreto antiguo conservado")
