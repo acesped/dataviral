@@ -309,10 +309,11 @@
     },
     "DV-416": {
       "reel": "publicado",
-      "updated_at": "2026-10-24T21:02:57.830749+00:00",
+      "updated_at": "2026-10-24T21:03:34.093332+00:00",
       "share_to_feed": true,
       "reel_id": "17897191086424760",
-      "story": "enviando"
+      "story": "publicado",
+      "story_id": "18117662689805264"
     }
   }
 }
