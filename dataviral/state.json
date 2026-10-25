@@ -317,10 +317,11 @@
     },
     "DV-327": {
       "reel": "publicado",
-      "updated_at": "2026-10-25T03:03:37.307696+00:00",
+      "updated_at": "2026-10-25T03:04:12.506829+00:00",
       "share_to_feed": true,
       "reel_id": "18385390105234219",
-      "story": "enviando"
+      "story": "publicado",
+      "story_id": "18143050696716863"
     }
   }
 }
