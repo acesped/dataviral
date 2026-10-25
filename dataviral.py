@@ -9,8 +9,8 @@ no consigue al menos una foto real. Crea escenas limpias, subtítulos centrales,
 voz neural (edge-tts), música original sintetizada y portada. Publicación por
 API de Instagram: publicación automática opcional con controles de fuente, identidad y antidualidad.
 
-INSTALAR: pip install pillow requests edge-tts
-         y ffmpeg instalado en el sistema (disponible en Google Colab).
+INSTALAR: pip install pillow requests edge-tts mutagen imageio-ffmpeg
+         y un ejecutable ffmpeg en PATH (ver workflow GitHub Actions).
 PRUEBA:  python dataviral.py --out output
 CON IA:  GEMINI_API_KEY=... python dataviral.py --out output
 PUBLICAR AUTOMATICAMENTE: python dataviral.py --publish --auto-publish --story
@@ -414,8 +414,9 @@ def render(ep,out,photo_dir=None,voice=True):
    asyncio.run(speak(ep['script'],voice_path));has_voice=True
   except Exception as exc: print('Narración no disponible:',exc,flush=True)
  if has_voice:
-  probe=subprocess.run(['ffprobe','-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',str(voice_path)],capture_output=True,text=True)
-  duration=float(probe.stdout.strip() or '0')
+  # Mutagen obtiene la duración del MP3 sin requerir ffprobe ni APT.
+  from mutagen.mp3 import MP3
+  duration=float(MP3(str(voice_path)).info.length)
   if duration>sum(lengths)-0.8:
    rate=duration/(sum(lengths)-0.8)
    if rate>1.5:raise RuntimeError('Narración excesiva para 21 s; reformular guion, no cortar audio')
