@@ -1,25 +1,30 @@
-name: DATO_WOW - Groq Gemini OpenRouter - Instagram
+name: DATO WOW - Sismos - Instagram
 
 on:
   workflow_dispatch:
     inputs:
-      episode_id:
-        description: 'ID opcional (vacio = siguiente episodio pendiente al publicar)'
+      topic:
+        description: 'Tema sísmico opcional (vacío = selección editorial)'
+        required: false
+        default: ''
+        type: string
+      episode_json:
+        description: 'Ruta de un guion JSON previamente revisado y guardado en el repositorio'
         required: false
         default: ''
         type: string
       publish:
-        description: 'Publicar un Reel en feed y Story'
+        description: 'Publicar en Instagram (requiere episode_json y approved_id)'
         required: true
-        default: true
+        default: false
         type: boolean
-      auto_publish:
-        description: 'Publicacion autonoma; tambien se activa si publish=true y episode_id esta vacio'
+      story:
+        description: 'Publicar también como Story cuando publish=true'
         required: true
-        default: true
+        default: false
         type: boolean
       approved_id:
-        description: 'Si auto_publish=false, escribe ID revisado para publicar'
+        description: 'ID exacto del episodio revisado, obligatorio al publicar'
         required: false
         default: ''
         type: string
@@ -37,159 +42,154 @@ jobs:
     timeout-minutes: 45
     env:
       PYTHONUNBUFFERED: '1'
-      OPENROUTER_MODEL: 'openrouter/free'
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
       INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
       IG_GRAPH_VERSION: 'v25.0'
-      IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME || 'dato_wow_' }}
+      IG_EXPECTED_USERNAME: 'dato_wow_'
       GH_TOKEN: ${{ github.token }}
       GITHUB_REPOSITORY: ${{ github.repository }}
       GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
+      DV_VOICE: es-CL-CatalinaNeural
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Python
+      - name: Preparar Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: pip
 
-      - name: Verificar e instalar FFmpeg y OCR (tiempo controlado)
+      - name: Instalar FFmpeg y Tesseract solo si faltan
         shell: bash
-        timeout-minutes: 9
+        timeout-minutes: 16
         run: |
           set -euo pipefail
-          echo 'Comprobando herramientas presentes en el runner...'
-          missing=()
-          command -v ffmpeg >/dev/null || missing+=(ffmpeg)
-          command -v tesseract >/dev/null || missing+=(tesseract-ocr tesseract-ocr-eng)
-          if (( ${#missing[@]} > 0 )); then
-            echo "Paquetes que faltan: ${missing[*]}"
-            # Evita esperar indefinidamente por mirrors Ubuntu lentos.
-            apt_opts=(-o Acquire::Retries=1 -o Acquire::http::Timeout=20
-                      -o Acquire::https::Timeout=20 -o Dpkg::Use-Pty=0)
-            timeout --signal=TERM --kill-after=10s 150s \
-              sudo apt-get "${apt_opts[@]}" update -qq
-            timeout --signal=TERM --kill-after=10s 330s \
-              sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" \
-              install -y --no-install-recommends "${missing[@]}"
-          else
-            echo 'FFmpeg y Tesseract ya disponibles: no se instala nada con APT.'
+          packages=()
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            packages+=(ffmpeg)
           fi
-          command -v ffmpeg >/dev/null || { echo '::error::FFmpeg no disponible'; exit 1; }
-          command -v tesseract >/dev/null || { echo '::error::Tesseract no disponible'; exit 1; }
-
-      - name: Instalar dependencias Python
-        shell: bash
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check --retries 2 --timeout 30 -r requirements.txt
-
-      - name: Verificar herramientas de video y OCR
-        shell: bash
-        run: |
-          set -euo pipefail
-          command -v ffmpeg >/dev/null || { echo '::error::FFmpeg no instalado'; exit 1; }
-          command -v tesseract >/dev/null || { echo '::error::Tesseract OCR no instalado'; exit 1; }
-          ffmpeg -version | head -n 1
-          tesseract --version 2>&1 | head -n 1
+          if ! command -v tesseract >/dev/null 2>&1; then
+            packages+=(tesseract-ocr)
+          fi
+          if ! command -v tesseract >/dev/null 2>&1 || \
+             ! tesseract --list-langs 2>/dev/null | grep -qx eng; then
+            packages+=(tesseract-ocr-eng)
+          fi
+          if (( ${#packages[@]} > 0 )); then
+            printf 'Instalando: %s\n' "${packages[*]}"
+            sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=45 \
+              -o Acquire::https::Timeout=45 \
+              -o Dpkg::Use-Pty=0 \
+              update -qq
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=45 \
+              -o Acquire::https::Timeout=45 \
+              -o Dpkg::Use-Pty=0 \
+              install -y --no-install-recommends "${packages[@]}"
+          else
+            echo 'Herramientas ya instaladas.'
+          fi
+          command -v ffmpeg >/dev/null || { echo '::error::Falta FFmpeg'; exit 1; }
+          command -v tesseract >/dev/null || { echo '::error::Falta Tesseract'; exit 1; }
           tesseract --list-langs 2>&1
+
+      - name: Instalar bibliotecas Python
+        shell: bash
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --retries 3 --timeout 45 \
+            'Pillow>=10,<13' 'requests>=2.31,<3' 'edge-tts>=6,<8'
+
+      - name: Verificar programa y dependencias
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dataviral.py || { echo '::error::Sube dataviral.py a la raíz del repositorio'; exit 1; }
+          python -m py_compile dataviral.py
           python - <<'PY'
           import shutil
           from PIL import Image
-          assert shutil.which('ffmpeg'), 'FFmpeg no disponible'
-          assert shutil.which('tesseract'), 'Tesseract no disponible'
-          print('Pillow, FFmpeg y OCR disponibles. Las fotos se validaran antes del render.')
+          import requests, edge_tts
+          assert shutil.which('ffmpeg'), 'Falta FFmpeg'
+          assert shutil.which('tesseract'), 'Falta Tesseract'
+          print('Sintaxis, Pillow, Requests, Edge TTS, FFmpeg y Tesseract: OK')
           PY
 
-      - name: Verificar catalogo y sintaxis
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m py_compile dataviral.py
-          python - <<'PY'
-          import dataviral
-          episodes = dataviral.catalog()
-          assert len(episodes) == 500
-          assert len({ep['id'] for ep in episodes}) == 500
-          print('Catalogo de 500 temas cargado')
-          PY
-
-      - name: Diagnosticar usuario Instagram
+      - name: Validar modo seguro de publicación
         shell: bash
         env:
-          REPOSITORY_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
+          PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+          STORY: ${{ inputs.story && 'true' || 'false' }}
+          TOPIC: ${{ inputs.topic }}
+          EPISODE_JSON: ${{ inputs.episode_json }}
+          APPROVED: ${{ inputs.approved_id }}
         run: |
           set -euo pipefail
-          echo "Repositorio: $GITHUB_REPOSITORY"
-          echo "Rama del workflow: $GITHUB_REF"
-          if [[ -z "${REPOSITORY_USERNAME:-}" ]]; then
-            echo '::warning::IG_EXPECTED_USERNAME no definida en Repository variables; se usara @dato_wow_.'
+          if [[ "$PUBLISH" == 'true' ]]; then
+            [[ -n "$EPISODE_JSON" && -f "$EPISODE_JSON" ]] || {
+              echo '::error::Para publicar, usa un JSON previamente revisado y disponible en el repositorio.'; exit 1;
+            }
+            [[ -n "$APPROVED" ]] || { echo '::error::Debes indicar approved_id'; exit 1; }
+            [[ -n "${INSTAGRAM_TOKEN:-}" && -n "${INSTAGRAM_USER_ID:-}" ]] || {
+              echo '::error::Faltan credenciales de Instagram'; exit 1;
+            }
+            [[ "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]] || {
+              echo '::error::INSTAGRAM_USER_ID debe ser numérico'; exit 1;
+            }
+            python - "$EPISODE_JSON" "$APPROVED" <<'PY'
+          import json,sys
+          with open(sys.argv[1],encoding='utf-8') as f: episode=json.load(f)
+          if episode.get('episode_id')!=sys.argv[2]:
+              raise SystemExit('::error::approved_id no coincide con episode_id del JSON')
+          print('Aprobación y JSON coinciden:',episode['episode_id'])
+          PY
           else
-            echo 'Usuario obtenido desde Repository variables.'
+            echo 'Modo vista previa: NO se publicará en Instagram.'
           fi
-          [[ -n "${IG_EXPECTED_USERNAME:-}" ]] || { echo '::error::Usuario Instagram vacio'; exit 1; }
-          echo "Usuario esperado: @${IG_EXPECTED_USERNAME}"
+          if [[ "$STORY" == 'true' && "$PUBLISH" != 'true' ]]; then
+            echo '::warning::Story ignorada porque publish=false.'
+          fi
 
-      - name: Validar configuracion
+      - name: Generar video sísmico de DATO WOW
         shell: bash
+        timeout-minutes: 17
         env:
           PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
-          AUTO: ${{ inputs.auto_publish && 'true' || 'false' }}
-          EPISODE: ${{ inputs.episode_id }}
+          STORY: ${{ inputs.story && 'true' || 'false' }}
+          TOPIC: ${{ inputs.topic }}
+          EPISODE_JSON: ${{ inputs.episode_json }}
           APPROVED: ${{ inputs.approved_id }}
         run: |
           set -euo pipefail
-          [[ -n "${GROQ_API_KEY:-}" || -n "${GEMINI_API_KEY:-}" || -n "${OPENROUTER_API_KEY:-}" ]] || { echo '::error::Configura una clave de IA'; exit 1; }
-          if [[ "$PUBLISH" == true ]]; then
-            [[ -n "${INSTAGRAM_TOKEN:-}" && -n "${INSTAGRAM_USER_ID:-}" ]] || { echo '::error::Faltan secretos de Instagram'; exit 1; }
-            [[ "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]] || { echo '::error::INSTAGRAM_USER_ID no numerico'; exit 1; }
-            [[ -n "${IG_EXPECTED_USERNAME:-}" ]] || { echo '::error::IG_EXPECTED_USERNAME vacio'; exit 1; }
-            if [[ -z "$EPISODE" ]]; then
-              echo 'Modo autonomo: seleccion de episodio pendiente.'
-            elif [[ "$AUTO" != true ]]; then
-              [[ "$EPISODE" == "$APPROVED" ]] || { echo '::error::Confirma approved_id o activa auto_publish'; exit 1; }
-            fi
+          args=(--out output_sismos)
+          if [[ -n "$EPISODE_JSON" ]]; then
+            args+=(--episode-json "$EPISODE_JSON")
+          elif [[ -n "$TOPIC" ]]; then
+            args+=(--topic "$TOPIC")
           fi
-
-      - name: Informar proveedores de IA
-        shell: bash
-        run: |
-          echo 'Proveedores configurables: Groq, Gemini y OpenRouter gratuito'
-
-      - name: Generar video con foto unica sin textos y publicar
-        shell: bash
-        env:
-          PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
-          AUTO: ${{ inputs.auto_publish && 'true' || 'false' }}
-          EPISODE: ${{ inputs.episode_id }}
-          APPROVED: ${{ inputs.approved_id }}
-        run: |
-          set -euo pipefail
-          args=()
-          if [[ -n "$EPISODE" ]]; then args+=(--episode "$EPISODE"); fi
-          if [[ "$PUBLISH" == true ]]; then args+=(--publish); fi
-          if [[ "$AUTO" == true || ( "$PUBLISH" == true && -z "$EPISODE" ) ]]; then
-            args+=(--auto-publish)
+          if [[ "$PUBLISH" == 'true' ]]; then
+            args+=(--publish --approved-id "$APPROVED")
+            if [[ "$STORY" == 'true' ]]; then args+=(--story); fi
           fi
-          if [[ -n "$APPROVED" ]]; then args+=(--approved-id "$APPROVED"); fi
           python dataviral.py "${args[@]}"
 
-      - name: Guardar guion MP4 y evidencias de imagen
+      - name: Guardar video, portada, guion y evidencias
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dataviral-${{ github.run_id }}-${{ github.run_attempt }}
+          name: dato-wow-sismos-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            output/*.json
-            output/*.mp4
-            output/*.jpg
-            output/**/foto_principal.jpg
-            output/**/creditos_imagenes.json
-          if-no-files-found: ignore
-          retention-days: 7
+            output_sismos/**/*.json
+            output_sismos/**/*.mp4
+            output_sismos/**/*.jpg
+            output_sismos/**/*.png
+          if-no-files-found: warn
+          retention-days: 14
