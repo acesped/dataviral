@@ -173,25 +173,55 @@ def generate_angle(topic, history, use_ai=True):
              created_at=utcnow(),verified=False,review_note='Revisar guion frente a la fuente antes de publicar')
 
 def ai_json(prompt):
+ """Gemini con descubrimiento de modelos y respaldo gratuito OpenRouter.
+ Un error 404 del modelo no bloquea la generación del episodio.
+ """
+ problems=[]
  key=os.getenv('GEMINI_API_KEY','').strip()
  if key:
-  model=os.getenv('GEMINI_MODEL','gemini-2.5-flash-lite')
-  r=HTTP.post('https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',
-     headers={'x-goog-api-key':key},json={'contents':[{'parts':[{'text':prompt}]}],
-     'generationConfig':{'temperature':0.45,'maxOutputTokens':1024,'responseMimeType':'application/json'}},timeout=85)
-  r.raise_for_status();obj=r.json();raw=''.join(p.get('text','') for p in obj['candidates'][0]['content']['parts'])
- else:
+  configured=os.getenv('GEMINI_MODEL','').strip().removeprefix('models/')
+  candidates=[configured] if configured else []
+  try:
+   listing=HTTP.get('https://generativelanguage.googleapis.com/v1beta/models',
+      headers={'x-goog-api-key':key},params={'pageSize':100},timeout=25)
+   listing.raise_for_status()
+   available=[]
+   for m in listing.json().get('models',[]):
+    name=str(m.get('name','')).removeprefix('models/')
+    if name.startswith('gemini-') and 'generateContent' in (m.get('supportedGenerationMethods') or []) and not any(z in name for z in ('image','audio','tts','embedding','live')):
+     available.append(name)
+   available.sort(key=lambda name:(0 if 'flash-lite' in name else 1 if 'flash' in name else 2, 'preview' in name, name))
+   candidates.extend(available[:6])
+  except Exception as exc:problems.append('Listado Gemini: '+str(exc)[:110])
+  for model in dict.fromkeys(candidates):
+   try:
+    r=HTTP.post('https://generativelanguage.googleapis.com/v1beta/models/'+urllib.parse.quote(model,safe='')+':generateContent',
+      headers={'x-goog-api-key':key},json={'contents':[{'parts':[{'text':prompt}]}],
+      'generationConfig':{'temperature':0.35,'maxOutputTokens':1600,'responseMimeType':'application/json'}},timeout=90)
+    if r.status_code in (400,404,429,503):
+     problems.append(f'Gemini {model}: HTTP {r.status_code}');continue
+    r.raise_for_status()
+    raw=''.join(str(part.get('text','')) for part in (r.json().get('candidates',[{}])[0].get('content',{}).get('parts') or []))
+    if not raw.strip():raise ValueError('Respuesta sin texto')
+    break
+   except Exception as exc:
+    problems.append(f'Gemini {model}: {str(exc)[:100]}')
+  else:raw=None
+ else:raw=None
+ if raw is None:
   key=os.getenv('OPENROUTER_API_KEY','').strip()
-  if not key: raise RuntimeError('No hay clave IA')
+  if not key:raise RuntimeError('Sin modelo accesible. '+'; '.join(problems[-5:]))
   model=os.getenv('OPENROUTER_MODEL','openrouter/free')
-  if model!='openrouter/free' and not model.endswith(':free'): raise RuntimeError('Solo se permite OpenRouter gratuito')
-  r=HTTP.post('https://openrouter.ai/api/v1/chat/completions',headers={'Authorization':'Bearer '+key},
-      json={'model':model,'messages':[{'role':'user','content':prompt}], 'temperature':0.35,'max_tokens':1100},timeout=100)
+  if model!='openrouter/free' and not model.endswith(':free'):
+   raise RuntimeError('Solo se permite OpenRouter gratuito')
+  r=HTTP.post('https://openrouter.ai/api/v1/chat/completions',
+    headers={'Authorization':'Bearer '+key},json={'model':model,'messages':[{'role':'user','content':prompt}],
+    'temperature':0.35,'max_tokens':1400},timeout=110)
   r.raise_for_status();raw=r.json()['choices'][0]['message']['content']
- if not isinstance(raw,str): raise ValueError('Respuesta IA no textual')
+ if not isinstance(raw,str):raise ValueError('Respuesta IA no textual')
  raw=re.sub(r'^```(?:json)?\s*|\s*```$','',raw.strip(),flags=re.I)
  match=re.search(r'\{[\s\S]*\}',raw)
- if not match: raise ValueError('IA no devolvió JSON')
+ if not match:raise ValueError('IA no devolvió JSON')
  return json.loads(match.group())
 
 
@@ -314,25 +344,36 @@ def wrap(draw,text,ft,width):
  return out
 
 def clean_scene(photo,message,dest):
+ """Fondo fotográfico limpio; adapta textos largos sin truncarlos."""
  with Image.open(photo) as src:
   im=ImageOps.fit(ImageOps.exif_transpose(src).convert('RGB'),(W,H),method=Image.Resampling.LANCZOS)
  im=ImageEnhance.Contrast(im).enhance(1.11)
- # Oscurecimiento muy ligero del fondo; texto con sombra en el centro.
- tint=Image.new('RGB',(W,H),(0,0,0)); im=Image.blend(im,tint,0.36)
- d=ImageDraw.Draw(im)
- message=re.sub(r'\s+',' ',message).strip()
- if len(message)>155:raise ValueError('Texto demasiado largo, debe reformularse')
- for sz in range(64,30,-2):
-  ft=font(sz);lines=wrap(d,message.upper(),ft,W-112)
-  if len(lines)<=4 and len(lines)*(sz+17)<=370:break
- else:raise ValueError('Escena con texto que no cabe')
- lineh=sz+17; y=H//2-(len(lines)*lineh)//2
- for ln in lines:
-  bbox=d.textbbox((0,0),ln,font=ft,stroke_width=2)
+ im=Image.blend(im,Image.new('RGB',(W,H),(0,0,0)),0.36)
+ draw=ImageDraw.Draw(im)
+ message=re.sub(r'\s+',' ',str(message or '')).strip()
+ if not message:raise ValueError('Escena sin texto')
+ # Más espacio vertical, tipografía realmente adaptable. No cortar mensajes.
+ max_width=W-104
+ choices=[]
+ for size in range(65,17,-1):
+  ft=font(size)
+  lines=wrap(draw,message.upper(),ft,max_width)
+  line_height=int(size*1.27)
+  if not lines or len(lines)>8 or len(lines)*line_height>H*0.63:continue
+  if any(draw.textbbox((0,0),line,font=ft,stroke_width=3)[2]>max_width for line in lines):continue
+  choices.append((size,ft,lines,line_height))
+  break
+ if not choices:
+  raise ValueError('Escena imposible de componer sin recortar: '+message[:90])
+ size,ft,lines,line_height=choices[0]
+ y=(H-len(lines)*line_height)//2
+ for line in lines:
+  bbox=draw.textbbox((0,0),line,font=ft,stroke_width=3)
   x=(W-(bbox[2]-bbox[0]))/2
-  d.text((x,y+3),ln,font=ft,fill='#FFFFFF',stroke_width=4,stroke_fill='#09131C')
-  y+=lineh
+  draw.text((x,y),line,font=ft,fill='white',stroke_width=3,stroke_fill='#09131C')
+  y+=line_height
  im.save(dest,quality=92)
+
 
 def soundtrack(path,secs=28,sr=22050):
  # Música instrumental original, sin material de terceros.
