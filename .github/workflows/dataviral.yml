@@ -1,30 +1,35 @@
+
 name: DATO WOW - Sismos - Instagram
 
 on:
   workflow_dispatch:
     inputs:
       topic:
-        description: 'Tema sísmico opcional (vacío = selección editorial)'
+        description: 'Tema sismico opcional (vacio = seleccion automatica)'
         required: false
         default: ''
         type: string
+
       episode_json:
-        description: 'Ruta de un guion JSON previamente revisado y guardado en el repositorio'
+        description: 'Ruta de un guion JSON revisado y guardado en GitHub'
         required: false
         default: ''
         type: string
+
       publish:
-        description: 'Publicar en Instagram (requiere episode_json y approved_id)'
+        description: 'Publicar solo con JSON e ID aprobados'
         required: true
         default: false
         type: boolean
+
       story:
-        description: 'Publicar también como Story cuando publish=true'
+        description: 'Publicar tambien en Stories'
         required: true
         default: false
         type: boolean
+
       approved_id:
-        description: 'ID exacto del episodio revisado, obligatorio al publicar'
+        description: 'ID exacto del episodio aprobado'
         required: false
         default: ''
         type: string
@@ -40,156 +45,294 @@ jobs:
   generar:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+
     env:
       PYTHONUNBUFFERED: '1'
+
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
       INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
       INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+
       IG_GRAPH_VERSION: 'v25.0'
       IG_EXPECTED_USERNAME: 'dato_wow_'
+
       GH_TOKEN: ${{ github.token }}
       GITHUB_REPOSITORY: ${{ github.repository }}
       GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
+
       DV_VOICE: es-CL-CatalinaNeural
 
     steps:
+      # --------------------------------------------
+      # 1. DESCARGAR REPOSITORIO
+      # --------------------------------------------
+
       - name: Checkout
         uses: actions/checkout@v4
+
+      # --------------------------------------------
+      # 2. PREPARAR PYTHON
+      # --------------------------------------------
 
       - name: Preparar Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Instalar FFmpeg y Tesseract solo si faltan
+      # --------------------------------------------
+      # 3. INSTALAR FFMPEG Y TESSERACT
+      # --------------------------------------------
+
+      - name: Instalar FFmpeg y Tesseract si faltan
         shell: bash
         timeout-minutes: 16
         run: |
           set -euo pipefail
+
+          echo "Comprobando herramientas..."
+
           packages=()
+
           if ! command -v ffmpeg >/dev/null 2>&1; then
             packages+=(ffmpeg)
           fi
+
           if ! command -v tesseract >/dev/null 2>&1; then
             packages+=(tesseract-ocr)
           fi
+
           if ! command -v tesseract >/dev/null 2>&1 || \
              ! tesseract --list-langs 2>/dev/null | grep -qx eng; then
             packages+=(tesseract-ocr-eng)
           fi
+
           if (( ${#packages[@]} > 0 )); then
-            printf 'Instalando: %s\n' "${packages[*]}"
+
+            echo "Instalando: ${packages[*]}"
+
             sudo apt-get \
               -o Acquire::Retries=3 \
               -o Acquire::http::Timeout=45 \
               -o Acquire::https::Timeout=45 \
               -o Dpkg::Use-Pty=0 \
               update -qq
-            sudo env DEBIAN_FRONTEND=noninteractive apt-get \
+
+            sudo env DEBIAN_FRONTEND=noninteractive \
+              apt-get \
               -o Acquire::Retries=3 \
               -o Acquire::http::Timeout=45 \
               -o Acquire::https::Timeout=45 \
               -o Dpkg::Use-Pty=0 \
-              install -y --no-install-recommends "${packages[@]}"
-          else
-            echo 'Herramientas ya instaladas.'
-          fi
-          command -v ffmpeg >/dev/null || { echo '::error::Falta FFmpeg'; exit 1; }
-          command -v tesseract >/dev/null || { echo '::error::Falta Tesseract'; exit 1; }
-          tesseract --list-langs 2>&1
+              install -y --no-install-recommends \
+              "${packages[@]}"
 
-      - name: Instalar bibliotecas Python
+          else
+            echo "FFmpeg y Tesseract ya disponibles."
+          fi
+
+          command -v ffmpeg >/dev/null || {
+            echo "::error::FFmpeg no disponible"
+            exit 1
+          }
+
+          command -v tesseract >/dev/null || {
+            echo "::error::Tesseract no disponible"
+            exit 1
+          }
+
+          ffmpeg -version | head -n 1
+          tesseract --list-langs
+
+      # --------------------------------------------
+      # 4. INSTALAR LIBRERIAS PYTHON
+      # --------------------------------------------
+
+      - name: Instalar dependencias Python
         shell: bash
         timeout-minutes: 8
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check --retries 3 --timeout 45 \
-            'Pillow>=10,<13' 'requests>=2.31,<3' 'edge-tts>=6,<8'
 
-      - name: Verificar programa y dependencias
+          python -m pip install \
+            --disable-pip-version-check \
+            --retries 3 \
+            --timeout 45 \
+            'Pillow>=10,<13' \
+            'requests>=2.31,<3' \
+            'edge-tts>=6,<8'
+
+      # --------------------------------------------
+      # 5. VALIDAR SCRIPT
+      # --------------------------------------------
+
+      - name: Verificar dataviral.py
         shell: bash
         run: |
           set -euo pipefail
-          test -f dataviral.py || { echo '::error::Sube dataviral.py a la raíz del repositorio'; exit 1; }
+
+          test -f dataviral.py || {
+            echo "::error::No existe dataviral.py"
+            exit 1
+          }
+
           python -m py_compile dataviral.py
+
           python - <<'PY'
           import shutil
           from PIL import Image
-          import requests, edge_tts
-          assert shutil.which('ffmpeg'), 'Falta FFmpeg'
-          assert shutil.which('tesseract'), 'Falta Tesseract'
-          print('Sintaxis, Pillow, Requests, Edge TTS, FFmpeg y Tesseract: OK')
+          import requests
+          import edge_tts
+
+          assert shutil.which("ffmpeg")
+          assert shutil.which("tesseract")
+
+          print("Python, Pillow, Requests y Edge TTS: OK")
+          print("FFmpeg y Tesseract: OK")
           PY
 
-      - name: Validar modo seguro de publicación
+      # --------------------------------------------
+      # 6. VALIDAR MODO DE PUBLICACION
+      # --------------------------------------------
+
+      - name: Resolver modo de ejecucion
+        id: modo
         shell: bash
+
         env:
-          PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
-          STORY: ${{ inputs.story && 'true' || 'false' }}
-          TOPIC: ${{ inputs.topic }}
+          REQUEST_PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+          REQUEST_STORY: ${{ inputs.story && 'true' || 'false' }}
           EPISODE_JSON: ${{ inputs.episode_json }}
           APPROVED: ${{ inputs.approved_id }}
+
         run: |
           set -euo pipefail
-          if [[ "$PUBLISH" == 'true' ]]; then
+
+          if [[ "$REQUEST_PUBLISH" == "true" && \
+                -z "$EPISODE_JSON" && \
+                -z "$APPROVED" ]]; then
+
+            echo "::notice::No hay episodio aprobado."
+            echo "Se generara una VISTA PREVIA."
+
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "story=false" >> "$GITHUB_OUTPUT"
+
+          elif [[ "$REQUEST_PUBLISH" == "true" ]]; then
+
             [[ -n "$EPISODE_JSON" && -f "$EPISODE_JSON" ]] || {
-              echo '::error::Para publicar, usa un JSON previamente revisado y disponible en el repositorio.'; exit 1;
+              echo "::error::Indica un episode_json existente."
+              exit 1
             }
-            [[ -n "$APPROVED" ]] || { echo '::error::Debes indicar approved_id'; exit 1; }
-            [[ -n "${INSTAGRAM_TOKEN:-}" && -n "${INSTAGRAM_USER_ID:-}" ]] || {
-              echo '::error::Faltan credenciales de Instagram'; exit 1;
+
+            [[ -n "$APPROVED" ]] || {
+              echo "::error::Debes indicar approved_id."
+              exit 1
             }
+
+            [[ -n "${INSTAGRAM_TOKEN:-}" && \
+               -n "${INSTAGRAM_USER_ID:-}" ]] || {
+              echo "::error::Faltan credenciales de Instagram."
+              exit 1
+            }
+
             [[ "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]] || {
-              echo '::error::INSTAGRAM_USER_ID debe ser numérico'; exit 1;
+              echo "::error::INSTAGRAM_USER_ID no es numerico."
+              exit 1
             }
-            python - "$EPISODE_JSON" "$APPROVED" <<'PY'
-          import json,sys
-          with open(sys.argv[1],encoding='utf-8') as f: episode=json.load(f)
-          if episode.get('episode_id')!=sys.argv[2]:
-              raise SystemExit('::error::approved_id no coincide con episode_id del JSON')
-          print('Aprobación y JSON coinciden:',episode['episode_id'])
-          PY
+
+            python - "$EPISODE_JSON" "$APPROVED" <<'PYCODE'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as f:
+              episode = json.load(f)
+
+          if episode.get("episode_id") != sys.argv[2]:
+              raise SystemExit(
+                  "::error::approved_id no coincide con episode_id"
+              )
+
+          print("Episodio aprobado:", episode["episode_id"])
+          PYCODE
+
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+
+            if [[ "$REQUEST_STORY" == "true" ]]; then
+              echo "story=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "story=false" >> "$GITHUB_OUTPUT"
+            fi
+
           else
-            echo 'Modo vista previa: NO se publicará en Instagram.'
-          fi
-          if [[ "$STORY" == 'true' && "$PUBLISH" != 'true' ]]; then
-            echo '::warning::Story ignorada porque publish=false.'
+
+            echo "Modo vista previa: no se publica."
+
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "story=false" >> "$GITHUB_OUTPUT"
+
           fi
 
-      - name: Generar video sísmico de DATO WOW
+      # --------------------------------------------
+      # 7. GENERAR REEL DE SISMOS
+      # --------------------------------------------
+
+      - name: Generar video DATO WOW sobre sismos
         shell: bash
         timeout-minutes: 17
+
         env:
-          PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
-          STORY: ${{ inputs.story && 'true' || 'false' }}
+          PUBLISH: ${{ steps.modo.outputs.publish }}
+          STORY: ${{ steps.modo.outputs.story }}
           TOPIC: ${{ inputs.topic }}
           EPISODE_JSON: ${{ inputs.episode_json }}
           APPROVED: ${{ inputs.approved_id }}
+
         run: |
           set -euo pipefail
+
           args=(--out output_sismos)
+
           if [[ -n "$EPISODE_JSON" ]]; then
             args+=(--episode-json "$EPISODE_JSON")
+
           elif [[ -n "$TOPIC" ]]; then
             args+=(--topic "$TOPIC")
           fi
-          if [[ "$PUBLISH" == 'true' ]]; then
-            args+=(--publish --approved-id "$APPROVED")
-            if [[ "$STORY" == 'true' ]]; then args+=(--story); fi
+
+          if [[ "$PUBLISH" == "true" ]]; then
+
+            args+=(--publish)
+            args+=(--approved-id "$APPROVED")
+
+            if [[ "$STORY" == "true" ]]; then
+              args+=(--story)
+            fi
+
           fi
+
+          echo "Ejecutando dataviral.py..."
+
           python dataviral.py "${args[@]}"
 
-      - name: Guardar video, portada, guion y evidencias
+      # --------------------------------------------
+      # 8. GUARDAR RESULTADOS
+      # --------------------------------------------
+
+      - name: Guardar Reel, portada y guion
         if: always()
         uses: actions/upload-artifact@v4
+
         with:
           name: dato-wow-sismos-${{ github.run_id }}-${{ github.run_attempt }}
+
           path: |
             output_sismos/**/*.json
             output_sismos/**/*.mp4
             output_sismos/**/*.jpg
             output_sismos/**/*.png
+
           if-no-files-found: warn
           retention-days: 14
