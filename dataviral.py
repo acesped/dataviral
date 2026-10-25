@@ -11,9 +11,9 @@ API de Instagram opcional y con aprobación explícita; NO publica por defecto.
 
 INSTALAR: pip install pillow requests edge-tts
          y ffmpeg instalado en el sistema (disponible en Google Colab).
-PRUEBA:  python dato_wow_sismos.py --out output
-CON IA:  GEMINI_API_KEY=... python dato_wow_sismos.py --out output
-PUBLICAR: python dato_wow_sismos.py --episode-json output_sismos/ID_guion.json --publish --approved-id ID
+PRUEBA:  python dataviral.py --out output
+CON IA:  GEMINI_API_KEY=... python dataviral.py --out output
+PUBLICAR: python dataviral.py --episode-json output_sismos/ID_guion.json --publish --approved-id ID
 Variables: INSTAGRAM_TOKEN, INSTAGRAM_USER_ID, IG_EXPECTED_USERNAME=dato_wow_,
            GH_TOKEN, GITHUB_REPOSITORY=propietario/repo; repositorio público.
 Opcional: --photo-dir /ruta/a/fotos para aportar fotografías autorizadas.
