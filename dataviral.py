@@ -7,13 +7,13 @@ Usa IA opcional para nuevos enfoques, fuentes científicas de referencia y fotos
 CC0/dominio público de Wikimedia Commons/Openverse; el video no se renderiza si
 no consigue al menos una foto real. Crea escenas limpias, subtítulos centrales,
 voz neural (edge-tts), música original sintetizada y portada. Publicación por
-API de Instagram opcional y con aprobación explícita; NO publica por defecto.
+API de Instagram: publicación automática opcional con controles de fuente, identidad y antidualidad.
 
 INSTALAR: pip install pillow requests edge-tts
          y ffmpeg instalado en el sistema (disponible en Google Colab).
 PRUEBA:  python dataviral.py --out output
 CON IA:  GEMINI_API_KEY=... python dataviral.py --out output
-PUBLICAR: python dataviral.py --episode-json output_sismos/ID_guion.json --publish --approved-id ID
+PUBLICAR AUTOMATICAMENTE: python dataviral.py --publish --auto-publish --story
 Variables: INSTAGRAM_TOKEN, INSTAGRAM_USER_ID, IG_EXPECTED_USERNAME=dato_wow_,
            GH_TOKEN, GITHUB_REPOSITORY=propietario/repo; repositorio público.
 Opcional: --photo-dir /ruta/a/fotos para aportar fotografías autorizadas.
@@ -477,8 +477,10 @@ def ig_publish(user,token,url,caption,media_type='REELS'):
  else:raise RuntimeError('Timeout; publicación incierta, no reintentar automáticamente')
  return ig('POST',f'{user}/media_publish',token,{'creation_id':cid})['id']
 
-def publish(ep,movie,approval,story=False):
- if approval!=ep['episode_id']:raise RuntimeError('Necesita --approved-id que coincida con el episodio')
+def publish(ep,movie,approval,story=False,auto=False):
+ if not auto and approval!=ep['episode_id']:raise RuntimeError('Necesita --approved-id que coincida con el episodio')
+ if auto and not ep.get('base_verified'):
+  raise RuntimeError('Publicación autónoma bloqueada: episodio no basado en hechos editoriales verificados')
  expected=os.getenv('IG_EXPECTED_USERNAME',ACCOUNT).strip().lstrip('@').lower()
  if expected!=ACCOUNT:raise RuntimeError('Cuenta de destino debe ser @'+ACCOUNT)
  token=os.environ['INSTAGRAM_TOKEN'];user=os.environ['INSTAGRAM_USER_ID']
@@ -534,7 +536,7 @@ def main():
  ap.add_argument('--out',default='output_sismos');ap.add_argument('--topic',default='',help='ID de tema o vacío para elegir')
  ap.add_argument('--photo-dir',default='',help='Carpeta con fotografías propias/autorizadas, sin descarga')
  ap.add_argument('--no-ai',action='store_true');ap.add_argument('--no-voice',action='store_true')
- ap.add_argument('--publish',action='store_true');ap.add_argument('--approved-id',default='');ap.add_argument('--story',action='store_true')
+ ap.add_argument('--publish',action='store_true');ap.add_argument('--auto-publish',action='store_true',help='Publicar automáticamente solo temas documentados de la base editorial');ap.add_argument('--approved-id',default='');ap.add_argument('--story',action='store_true')
  ap.add_argument('--metrics-csv',default='');ap.add_argument('--list',action='store_true')
  ap.add_argument('--episode-json',default='',help='Reutilizar exactamente un guion previamente revisado')
  args=ap.parse_args()
@@ -550,6 +552,10 @@ def main():
    gh=Github();raw,_=gh.read('dataviral/sismos_editorial.json')
    if raw:history=json.loads(raw)
   except Exception as exc:print('Historial remoto no disponible:',str(exc)[:140],flush=True)
+ if args.auto_publish and not args.publish:
+  raise RuntimeError('--auto-publish requiere --publish')
+ if args.auto_publish and args.episode_json:
+  raise RuntimeError('No usar --episode-json con --auto-publish: solo se admiten temas base')
  if args.episode_json:
   ep=read_json(args.episode_json,None)
   if not isinstance(ep,dict) or not all(ep.get(x) for x in ('episode_id','title','script','visuals','source','queries')):
@@ -558,18 +564,25 @@ def main():
    raise RuntimeError('Este archivo solo admite episodios sísmicos de DATO WOW')
   t={'id':ep.get('id','revisado')}
  else:
-  t=choose_topic(history,args.topic);ep=generate_angle(t,history,use_ai=not args.no_ai)
+  t=choose_topic(history,args.topic);ep=generate_angle(t,history,use_ai=(not args.no_ai and not args.auto_publish))
+  ep['base_verified']=bool(args.auto_publish and t.get('source') and t.get('fact') and t.get('lesson'))
+  ep['editorial_check']='Afirmaciones restringidas a la base editorial; no es verificación automática de la página de origen' if args.auto_publish else 'Requiere revisión de datos'
  episode=ep['episode_id'];write_json_atomic(out/(episode+'_guion.json'),ep)
  print('EPISODIO:',episode,'TEMA:',ep['title'],'FUENTE:',ep['source'],flush=True)
- if args.publish and args.approved_id!=episode:
+ if args.publish and not args.auto_publish and args.approved_id!=episode:
   raise RuntimeError('No se publica sin --approved-id '+episode+'; revise primero guion, fuente e imágenes')
+ if args.auto_publish and (not ep.get('base_verified') or not str(ep.get('source','')).startswith('https://')):
+  raise RuntimeError('No se puede autopublicar: falta fuente o afirmación editorial validada')
  movie,cover,credits=render(ep,out,args.photo_dir or None,voice=not args.no_voice)
  if not any(x.get('episode_id')==episode for x in history['items']):
   history['items'].append({'episode_id':episode,'topic':t['id'],'style':ep['style'],'angle':ep['angle'],
-                           'time':utcnow(),'status':'publicado' if args.publish else 'vista_previa'})
+                           'time':utcnow(),'status':'preparado' if args.publish else 'vista_previa'})
  write_json_atomic(history_path,history)
  if args.publish:
-  publish(ep,movie,args.approved_id,story=args.story)
+  publish(ep,movie,args.approved_id,story=args.story,auto=args.auto_publish)
+  for entry in history['items']:
+   if entry.get('episode_id')==episode:entry['status']='publicado'
+  write_json_atomic(history_path,history)
   # Solo persistir el historial remoto tras publicación confirmada.
   gh=Github();raw,sha=gh.read('dataviral/sismos_editorial.json')
   gh.write('dataviral/sismos_editorial.json',json.dumps(history,ensure_ascii=False,indent=2).encode(),sha)
