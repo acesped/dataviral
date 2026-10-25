@@ -5,19 +5,19 @@ on:
   workflow_dispatch:
     inputs:
       topic:
-        description: 'ID sísmico opcional; vacío = selección automática'
+        description: 'ID sismico opcional; vacio = seleccion automatica'
         required: false
         default: ''
         type: string
 
       publish:
-        description: 'Publicar Reel automáticamente (desactiva para vista previa)'
+        description: 'Generar y publicar Reel automaticamente'
         required: true
         default: true
         type: boolean
 
       story:
-        description: 'Publicar también una Story'
+        description: 'Publicar tambien Story'
         required: true
         default: true
         type: boolean
@@ -51,82 +51,25 @@ jobs:
       GITHUB_REPOSITORY: ${{ github.repository }}
       GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
 
-      DV_VOICE: es-CL-CatalinaNeural
+      DV_VOICE: 'es-CL-CatalinaNeural'
 
     steps:
+
       # 1. DESCARGAR REPOSITORIO
 
-      - name: Checkout
+      - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      # 2. CONFIGURAR PYTHON
+      # 2. PREPARAR PYTHON
 
-      - name: Preparar Python 3.11
+      - name: Preparar Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 3. INSTALAR FFMPEG Y TESSERACT
+      # 3. INSTALAR DEPENDENCIAS SIN APT
 
-      - name: Instalar FFmpeg y Tesseract solo si faltan
-        shell: bash
-        timeout-minutes: 16
-        run: |
-          set -euo pipefail
-
-          packages=()
-
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            packages+=(ffmpeg)
-          fi
-
-          if ! command -v tesseract >/dev/null 2>&1; then
-            packages+=(tesseract-ocr)
-          fi
-
-          if ! command -v tesseract >/dev/null 2>&1 || \
-             ! tesseract --list-langs 2>/dev/null | grep -qx eng; then
-            packages+=(tesseract-ocr-eng)
-          fi
-
-          if (( ${#packages[@]} > 0 )); then
-
-            printf 'Instalando: %s\n' "${packages[*]}"
-
-            sudo apt-get \
-              -o Acquire::Retries=3 \
-              -o Acquire::http::Timeout=45 \
-              -o Acquire::https::Timeout=45 \
-              -o Dpkg::Use-Pty=0 \
-              update -qq
-
-            sudo env DEBIAN_FRONTEND=noninteractive apt-get \
-              -o Acquire::Retries=3 \
-              -o Acquire::http::Timeout=45 \
-              -o Acquire::https::Timeout=45 \
-              -o Dpkg::Use-Pty=0 \
-              install -y --no-install-recommends \
-              "${packages[@]}"
-
-          else
-            echo 'FFmpeg y Tesseract ya instalados.'
-          fi
-
-          command -v ffmpeg >/dev/null || {
-            echo '::error::Falta FFmpeg'
-            exit 1
-          }
-
-          command -v tesseract >/dev/null || {
-            echo '::error::Falta Tesseract'
-            exit 1
-          }
-
-          tesseract --list-langs 2>&1
-
-      # 4. INSTALAR DEPENDENCIAS PYTHON
-
-      - name: Instalar bibliotecas Python
+      - name: Instalar dependencias Python y FFmpeg sin APT
         shell: bash
         timeout-minutes: 8
         run: |
@@ -138,41 +81,75 @@ jobs:
             --timeout 45 \
             'Pillow>=10,<13' \
             'requests>=2.31,<3' \
-            'edge-tts>=6,<8'
+            'edge-tts>=6,<8' \
+            'mutagen>=1.47,<2' \
+            'imageio-ffmpeg>=0.6,<1'
 
-      # 5. VERIFICAR SCRIPT
+          # Obtener FFmpeg directamente desde imageio-ffmpeg.
+          # No requiere apt-get ni descargar dependencias Ubuntu.
 
-      - name: Verificar programa y dependencias
+          mkdir -p "$RUNNER_TEMP/dato-wow-bin"
+
+          FFMPEG_BIN="$(python - <<'PY'
+          import imageio_ffmpeg
+          print(imageio_ffmpeg.get_ffmpeg_exe())
+          PY
+          )"
+
+          ln -sf "$FFMPEG_BIN" \
+            "$RUNNER_TEMP/dato-wow-bin/ffmpeg"
+
+          chmod +x "$FFMPEG_BIN"
+
+          # Disponible para todos los pasos siguientes.
+
+          echo "$RUNNER_TEMP/dato-wow-bin" >> "$GITHUB_PATH"
+
+          "$FFMPEG_BIN" -hide_banner -version | head -n 1
+
+      # 4. VERIFICAR PYTHON Y VIDEO
+
+      - name: Verificar Python y codificadores de video
         shell: bash
         run: |
           set -euo pipefail
 
           test -f dataviral.py || {
-            echo '::error::Falta dataviral.py en la raíz del repositorio'
+            echo '::error::Falta dataviral.py'
             exit 1
           }
 
           python -m py_compile dataviral.py
 
+          command -v ffmpeg >/dev/null || {
+            echo '::error::No existe FFmpeg'
+            exit 1
+          }
+
+          ffmpeg -hide_banner -encoders 2>/dev/null \
+            | grep -q 'libx264' || {
+              echo '::error::FFmpeg no incluye libx264'
+              exit 1
+            }
+
           python - <<'PY'
-          import shutil
-          from PIL import Image
           import requests
           import edge_tts
+          import imageio_ffmpeg
+          import mutagen
+          from PIL import Image
 
-          assert shutil.which('ffmpeg'), 'Falta FFmpeg'
-          assert shutil.which('tesseract'), 'Falta Tesseract'
-
-          print('Python, Pillow, Requests y Edge TTS: OK')
-          print('FFmpeg y Tesseract: OK')
+          print('Dependencias Python y FFmpeg disponibles.')
           PY
 
-      # 6. VALIDAR PUBLICACIÓN AUTOMÁTICA
+      # 5. VALIDAR INSTAGRAM
 
-      - name: Validar configuración para publicación automática
+      - name: Validar credenciales de Instagram
         shell: bash
+
         env:
           PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+
         run: |
           set -euo pipefail
 
@@ -180,31 +157,31 @@ jobs:
 
             [[ -n "${INSTAGRAM_TOKEN:-}" && \
                -n "${INSTAGRAM_USER_ID:-}" ]] || {
-              echo '::error::Faltan credenciales de Instagram'
+              echo '::error::Faltan secretos de Instagram'
               exit 1
             }
 
             [[ "$INSTAGRAM_USER_ID" =~ ^[0-9]+$ ]] || {
-              echo '::error::INSTAGRAM_USER_ID debe ser numérico'
+              echo '::error::INSTAGRAM_USER_ID debe ser numerico'
               exit 1
             }
 
-            [[ "${IG_EXPECTED_USERNAME:-}" == 'dato_wow_' ]] || {
-              echo '::error::La cuenta debe ser @dato_wow_'
+            [[ "$IG_EXPECTED_USERNAME" == 'dato_wow_' ]] || {
+              echo '::error::Cuenta de destino incorrecta'
               exit 1
             }
 
-            echo 'Publicación automática habilitada.'
+            echo 'Publicacion automatica solicitada para @dato_wow_.'
 
           else
-            echo 'Modo vista previa: no se publicará.'
+            echo 'Modo vista previa; no se publicara.'
           fi
 
-      # 7. GENERAR Y PUBLICAR REEL
+      # 6. GENERAR Y PUBLICAR REEL
 
-      - name: Generar y publicar Reel sísmico
+      - name: Generar y publicar Reel sismico
         shell: bash
-        timeout-minutes: 22
+        timeout-minutes: 30
 
         env:
           PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
@@ -216,9 +193,15 @@ jobs:
 
           args=(--out output_sismos)
 
+          # Tema opcional.
+          # Si esta vacio, Python selecciona uno automaticamente.
+
           if [[ -n "$TOPIC" ]]; then
             args+=(--topic "$TOPIC")
           fi
+
+          # Publicacion autonoma, sin episode_json
+          # ni approved_id.
 
           if [[ "$PUBLISH" == 'true' ]]; then
 
@@ -234,9 +217,9 @@ jobs:
 
           python dataviral.py "${args[@]}"
 
-      # 8. GUARDAR RESULTADOS
+      # 7. GUARDAR RESULTADOS
 
-      - name: Guardar video, portada, guion y evidencias
+      - name: Guardar video y evidencias
         if: always()
         uses: actions/upload-artifact@v4
 
@@ -248,6 +231,10 @@ jobs:
             output_sismos/**/*.mp4
             output_sismos/**/*.jpg
             output_sismos/**/*.png
+            output_sismos/*.json
+            output_sismos/*.mp4
+            output_sismos/*.jpg
+            output_sismos/*.png
 
           if-no-files-found: warn
           retention-days: 14
